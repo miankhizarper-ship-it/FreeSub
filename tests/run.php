@@ -167,6 +167,62 @@ if (run_suite($only, 'schema')) {
 /* -------------------------------------------------------------------------
  * 2. Security primitives
  * ---------------------------------------------------------------------- */
+if (run_suite($only, 'env')) {
+    $t->suite('Environment file');
+
+    // Parse .env.example exactly as the app would and make sure the shipped
+    // template yields sane values: no inline comments leaking into them.
+    $t->check('.env.example exists', is_file(FREESUB_ROOT . '/.env.example'));
+
+    $sample = (string) file_get_contents(FREESUB_ROOT . '/.env.example');
+    $parsed = [];
+
+    foreach (preg_split('/\R/', $sample) ?: [] as $line) {
+        $line = trim($line);
+
+        if ($line === '' || str_starts_with($line, '#')) {
+            continue;
+        }
+
+        if (preg_match('/^([A-Z0-9_]+)\s*=(.*)$/', $line, $m) !== 1) {
+            continue;
+        }
+
+        $value = trim($m[2]);
+
+        if ($value !== '' && $value[0] === '#') {
+            $value = '';
+        } elseif (($hash = strpos($value, ' #')) !== false) {
+            $value = rtrim(substr($value, 0, $hash));
+        }
+
+        $parsed[$m[1]] = $value;
+    }
+
+    $t->check('.env.example declares APP_ENV/APP_KEY/DB_DRIVER', isset($parsed['APP_ENV'], $parsed['APP_KEY'], $parsed['DB_DRIVER']));
+    $t->check('.env.example APP_URL is empty or a clean URL', ($parsed['APP_URL'] ?? '') === '' || preg_match('#^https?://[^\s\#]+$#', $parsed['APP_URL']) === 1, $parsed['APP_URL'] ?? null);
+    $t->check('.env.example has no value containing a comment', array_filter($parsed, static fn (string $v): bool => str_contains($v, '#')) === []);
+
+    // The real parser: a blank value followed by a comment must stay blank.
+    $temp = tempnam(sys_get_temp_dir(), 'freesub-env-');
+
+    if ($temp !== false) {
+        file_put_contents($temp, "FREESUB_TEST_A=   # note\nFREESUB_TEST_B=plain # trailing\nFREESUB_TEST_C=\"quoted # kept\"\nFREESUB_TEST_D=#only-comment\n");
+        env_load($temp);
+        @unlink($temp);
+
+        $t->check('env: blank value with comment parses to empty', env('FREESUB_TEST_A') === null, env('FREESUB_TEST_A'));
+        $t->check('env: trailing comment stripped', env('FREESUB_TEST_B') === 'plain', env('FREESUB_TEST_B'));
+        $t->check('env: quoted hash preserved', env('FREESUB_TEST_C') === 'quoted # kept', env('FREESUB_TEST_C'));
+        $t->check('env: comment-only value parses to empty', env('FREESUB_TEST_D') === null, env('FREESUB_TEST_D'));
+
+        foreach (['FREESUB_TEST_A', 'FREESUB_TEST_B', 'FREESUB_TEST_C', 'FREESUB_TEST_D'] as $key) {
+            putenv($key);
+            unset($_ENV[$key], $_SERVER[$key]);
+        }
+    }
+}
+
 if (run_suite($only, 'security')) {
     $t->suite('Security');
 

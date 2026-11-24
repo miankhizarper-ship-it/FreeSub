@@ -66,6 +66,9 @@ if (!function_exists('env_load')) {
                 if ($quote === '"') {
                     $value = str_replace(['\n', '\r', '\t', '\"', '\\\\'], ["\n", "\r", "\t", '"', '\\'], $value);
                 }
+            } elseif ($value !== '' && $value[0] === '#') {
+                // "KEY=   # explanation" — no value, only a comment.
+                $value = '';
             } elseif (($hash = strpos($value, ' #')) !== false) {
                 // Unquoted values may carry an inline comment.
                 $value = rtrim(substr($value, 0, $hash));
