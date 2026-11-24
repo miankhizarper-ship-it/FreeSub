@@ -131,7 +131,7 @@ Everything is read from the environment (`.env` or real env vars). The full list
 | Key | Purpose |
 |-----|---------|
 | `APP_ENV`, `APP_DEBUG` | `local` + `true` shows errors; **production must be `APP_ENV=production`, `APP_DEBUG=false`** |
-| `APP_URL` | Absolute base URL (no trailing slash). Leave empty to auto-detect |
+| `APP_URL` | Absolute base URL (no trailing slash), e.g. `https://freesub.example.com`. Leave empty to auto-detect from the request — convenient locally, but set it explicitly in production so links, emails and redirects never depend on the `Host` header |
 | `APP_KEY` | 32+ random characters; keep secret |
 | `APP_TIMEZONE` | Storage is always UTC; this only affects display |
 | `DB_DRIVER`, `DB_*` | `mysql` for production, `sqlite` for local experiments |
