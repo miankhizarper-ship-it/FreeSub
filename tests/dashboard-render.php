@@ -307,6 +307,56 @@ $failedHtml = render('dashboard/subdomain', [
 $rawError = (string) ($failedProv['job']['last_error'] ?? 'not-selected');
 check('the raw operator error is not even loaded into the view model', $rawError === 'not-selected', $rawError);
 check('the failed page shows safe user-facing copy', str_contains($failedHtml, 'Provisioning did not complete'));
+
+// The view must render the model's order faithfully, and the model must hand it
+// a chronological one. The seeded failure row happens to be written in the same
+// order it happened, so a second, deliberately out-of-order row goes through the
+// real view here: without the model's sort the page would show its steps
+// backwards, which is what this asserts against.
+$tangledJob = [
+    'status' => 'failed',
+    'attempts' => 3,
+    'created_at' => '2026-01-01 10:05:00',
+    'updated_at' => '2026-03-09 09:00:00',
+];
+$tangledSub = [
+    'id' => 424242,
+    'label' => 'tangled',
+    'fqdn' => 'tangled.kharcha.info',
+    'status' => 'failed',
+    'created_at' => '2026-01-01 10:00:00',
+    'updated_at' => '2026-01-01 10:10:00',
+    'provisioned_at' => null,
+];
+
+$tangledHtml = render('dashboard/subdomain', [
+    'authUser' => $owner,
+    'subdomain' => $tangledSub,
+    'state' => DashboardStatus::subdomain('failed'),
+    'job' => $tangledJob,
+    'records' => [],
+    'primaryRecord' => null,
+    'reservation' => null,
+    'timeline' => DashboardStatus::timeline($tangledSub, null, [], $tangledJob),
+    'canRelease' => true,
+    'releaseBlocked' => null,
+    'status' => 'failed',
+]);
+
+check('the rendered timeline reads forwards in time', (static function () use ($tangledHtml): bool {
+    preg_match_all('/timeline-time[^>]*>\s*([^<]+)</', $tangledHtml, $matches);
+
+    $stamps = array_map(static fn (string $value): int => (int) strtotime(trim($value)), $matches[1]);
+
+    if (count($stamps) < 3) {
+        return false;
+    }
+
+    $sorted = $stamps;
+    sort($sorted);
+
+    return $stamps === $sorted;
+})(), preg_match_all('/timeline-time[^>]*>\s*([^<]+)</', $tangledHtml, $probe) ? array_map('trim', $probe[1]) : 'no timeline stamps found');
 check('no provider response leaks into the failure page', !str_contains($failedHtml, '81044') && !str_contains($failedHtml, 'cf_secret'));
 
 // A pending subdomain must show "not live yet" and never a fake timestamp.

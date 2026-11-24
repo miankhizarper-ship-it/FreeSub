@@ -160,15 +160,19 @@ Database::execute(
 // ---------------------------------------------------------------------------
 
 $subdomains = [
-    // label, status, target, created offset, provisioned offset
-    ['atlas', 'active', '203.0.113.10', -86400 * 30, -86400 * 29],
-    ['lantern', 'pending_dns', '203.0.113.11', -86400 * 2, null],
-    ['rusty', 'failed', '203.0.113.12', -86400 * 9, null],
-    ['quiet-harbor', 'suspended', '203.0.113.13', -86400 * 45, -86400 * 44],
-    ['gone', 'terminated', null, -86400 * 90, null],
+    // label, status, target, created offset, provisioned offset, updated offset
+    // `updated` defaults to one hour after creation. A row that reached a later
+    // state carries the offset of that state: the provisioning worker writes the
+    // job first and the subdomain second, so a failed name is stamped at or
+    // after its last attempt, never before it.
+    ['atlas', 'active', '203.0.113.10', -86400 * 30, -86400 * 29, -86400 * 29],
+    ['lantern', 'pending_dns', '203.0.113.11', -86400 * 2, null, -86400 * 2],
+    ['rusty', 'failed', '203.0.113.12', -86400 * 9, null, -86400 * 8],
+    ['quiet-harbor', 'suspended', '203.0.113.13', -86400 * 45, -86400 * 44, -86400 * 10],
+    ['gone', 'terminated', null, -86400 * 90, null, -86400 * 20],
 ];
 
-foreach ($subdomains as $index => [$label, $status, $target, $createdOffset, $provisionedOffset]) {
+foreach ($subdomains as $index => [$label, $status, $target, $createdOffset, $provisionedOffset, $updatedOffset]) {
     Database::execute(
         'INSERT INTO subdomains (id, user_id, domain_id, reservation_id, label, fqdn, status, target, provisioned_at, created_at, updated_at)
          VALUES (:id, 1, 1, NULL, :label, :fqdn, :status, :target, :provisioned, :created, :updated)',
@@ -180,7 +184,7 @@ foreach ($subdomains as $index => [$label, $status, $target, $createdOffset, $pr
             'target' => $target,
             'provisioned' => $provisionedOffset !== null ? gmdate('Y-m-d H:i:s', time() + $provisionedOffset) : null,
             'created' => gmdate('Y-m-d H:i:s', time() + $createdOffset),
-            'updated' => gmdate('Y-m-d H:i:s', time() + $createdOffset + 3600),
+            'updated' => gmdate('Y-m-d H:i:s', time() + ($updatedOffset ?? $createdOffset + 3600)),
         ]
     );
 }

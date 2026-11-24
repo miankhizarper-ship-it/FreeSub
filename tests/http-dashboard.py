@@ -140,6 +140,12 @@ check(
     anon.get("/dashboard/settings.php")["location"] is not None,
 )
 
+check(
+    "/dashboard/ never answers with a directory listing",
+    anon.get("/dashboard/")["status"] in (301, 302, 303),
+    anon.get("/dashboard/")["status"],
+)
+
 # ---------------------------------------------------------------------------
 section("Owner: overview")
 
@@ -152,6 +158,18 @@ check("the overview does not leak the Clerk identity", "user_preview_owner" not 
 
 overview = owner.get("/dashboard.php")
 check("the overview reloads with the session", overview["status"] == 200, overview["status"])
+
+bare = owner.get("/dashboard/")
+check(
+    "a signed-in request for the bare directory lands on the overview",
+    bare["status"] in (301, 302, 303)
+    and (bare["location"] or "").endswith("/dashboard.php"),
+    (bare["status"], bare["location"]),
+)
+check(
+    "the directory redirect resolves to a page that renders",
+    owner.get("/dashboard/", follow=True)["status"] == 200,
+)
 check("every nav destination is present", all(
     fragment in overview["text"]
     for fragment in (

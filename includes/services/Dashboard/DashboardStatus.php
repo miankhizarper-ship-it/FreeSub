@@ -204,45 +204,42 @@ final class DashboardStatus
         array $records,
         ?array $job
     ): array {
+        // Each step keeps the raw stored timestamp alongside its display form.
+        // Ordering must use the raw value: the display format starts with a
+        // month *name*, so sorting on it would order steps alphabetically by
+        // month rather than in time.
         $steps = [];
 
-        if ($reservation !== null) {
+        $add = static function (string $key, string $label, mixed $raw, string $state, string $detail) use (&$steps): void {
             $steps[] = [
-                'key' => 'reservation',
-                'label' => 'Reservation requested',
-                'at' => self::date($reservation['created_at'] ?? null),
-                'state' => 'done',
-                'detail' => 'Requested by you',
+                'key' => $key,
+                'label' => $label,
+                'at' => self::date($raw),
+                '_raw' => is_string($raw) && trim($raw) !== '' && self::date($raw) !== null ? $raw : null,
+                'state' => $state,
+                'detail' => $detail,
             ];
+        };
+
+        if ($reservation !== null) {
+            $add('reservation', 'Reservation requested', $reservation['created_at'] ?? null, 'done', 'Requested by you');
 
             if (in_array((string) $reservation['status'], ['approved'], true) && ($reservation['reviewed_at'] ?? null) !== null) {
-                $steps[] = [
-                    'key' => 'approval',
-                    'label' => 'Approved',
-                    'at' => self::date($reservation['reviewed_at']),
-                    'state' => 'done',
-                    'detail' => 'Reviewed by the FreeSub team',
-                ];
+                $add('approval', 'Approved', $reservation['reviewed_at'], 'done', 'Reviewed by the FreeSub team');
             }
         }
 
         if ($job !== null) {
-            $steps[] = [
-                'key' => 'queued',
-                'label' => 'DNS provisioning queued',
-                'at' => self::date($job['created_at'] ?? null),
-                'state' => 'done',
-                'detail' => 'Waiting in the provisioning queue',
-            ];
+            $add('queued', 'DNS provisioning queued', $job['created_at'] ?? null, 'done', 'Waiting in the provisioning queue');
 
             if ((int) ($job['attempts'] ?? 0) > 0) {
-                $steps[] = [
-                    'key' => 'attempted',
-                    'label' => 'Provisioning attempted',
-                    'at' => self::date($job['updated_at'] ?? null),
-                    'state' => (string) $job['status'] === 'failed' ? 'failed' : 'done',
-                    'detail' => (int) $job['attempts'] . ' attempt' . ((int) $job['attempts'] === 1 ? '' : 's'),
-                ];
+                $add(
+                    'attempted',
+                    'Provisioning attempted',
+                    $job['updated_at'] ?? null,
+                    (string) $job['status'] === 'failed' ? 'failed' : 'done',
+                    (int) $job['attempts'] . ' attempt' . ((int) $job['attempts'] === 1 ? '' : 's')
+                );
             }
         }
 
@@ -261,34 +258,50 @@ final class DashboardStatus
         }
 
         if ($verified !== null) {
-            $steps[] = [
-                'key' => 'verified',
-                'label' => 'DNS verified',
-                'at' => self::date($verified),
-                'state' => 'done',
-                'detail' => 'Read back from the zone and compared',
-            ];
+            $add('verified', 'DNS verified', $verified, 'done', 'Read back from the zone and compared');
         }
 
         if ((string) $subdomain['status'] === 'active') {
-            $steps[] = [
-                'key' => 'active',
-                'label' => 'Active',
-                'at' => self::date($subdomain['provisioned_at'] ?? null),
-                'state' => 'done',
-                'detail' => 'Serving DNS',
-            ];
+            $add('active', 'Active', $subdomain['provisioned_at'] ?? null, 'done', 'Serving DNS');
         } elseif ((string) $subdomain['status'] === 'failed') {
-            $steps[] = [
-                'key' => 'failed',
-                'label' => 'Provisioning failed',
-                'at' => self::date($subdomain['updated_at'] ?? null),
-                'state' => 'failed',
-                'detail' => 'Support can retry this safely',
-            ];
+            $add('failed', 'Provisioning failed', $subdomain['updated_at'] ?? null, 'failed', 'Support can retry this safely');
         }
 
-        return $steps;
+        // The steps are collected in logical order, which is not chronological:
+        // a row's updated_at is when it was last written, so the failure step
+        // can precede the last attempt that caused it. A timeline that runs
+        // backwards reads as a bug. usort() is not stable and several steps can
+        // share a minute, so ties break on the original position.
+        $indexed = [];
+
+        foreach ($steps as $position => $step) {
+            $indexed[] = [$position, $step];
+        }
+
+        usort($indexed, static function (array $a, array $b): int {
+            $left = $a[1]['_raw'];
+            $right = $b[1]['_raw'];
+
+            // Undated steps cannot be placed between dated ones; they keep
+            // their relative order at the end.
+            if ($left === null || $right === null) {
+                if ($left === $right) {
+                    return $a[0] <=> $b[0];
+                }
+
+                return $left === null ? 1 : -1;
+            }
+
+            $order = strcmp($left, $right);
+
+            return $order !== 0 ? $order : ($a[0] <=> $b[0]);
+        });
+
+        return array_map(static function (array $pair): array {
+            unset($pair[1]['_raw']);
+
+            return $pair[1];
+        }, $indexed);
     }
 
     /**

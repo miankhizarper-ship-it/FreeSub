@@ -739,6 +739,12 @@ second state store — the database is the only source of truth.
 | Find a subdomain | `dashboard/search.php` | Availability check + reservation form |
 | Account | `dashboard/settings.php` | Profile, quota, security facts, sign-out |
 
+`/dashboard/` itself is not a screen: `dashboard/index.php` sends a signed-in
+visitor to the overview and a guest to sign-in, so the directory never returns a
+listing. URLs stay files with optional query strings — there is no front
+controller and Apache has no rewrite rules, so every link on these pages is a
+path that exists on disk.
+
 `preview-login.php` is a **local-only** helper for looking at these pages without
 Clerk credentials; it refuses to run unless `APP_ENV` is `local`/`testing` *and*
 the database is the seeded preview file. See [Previewing the dashboard](#previewing-the-dashboard).
@@ -937,8 +943,8 @@ Suites:
 | `views` | every view/link/redirect target exists, mount-prefix derivation |
 | `http` | HTTP journeys (needs a running server) |
 
-Current status: **634 assertions green** on PHP 8.5 with SQLite, plus **110
-end-to-end HTTP checks** in `tests/http-clerk.sh` and **88 render + 83 HTTP
+Current status: **638 assertions green** on PHP 8.5 with SQLite, plus **110
+end-to-end HTTP checks** in `tests/http-clerk.sh` and **89 render + 86 HTTP
 dashboard checks** in `tests/dashboard.sh`. Every one of them passes with
 `APP_DEBUG=true` and `APP_DEBUG=false`. The MySQL schema in `database/schema.sql` was validated against a real MariaDB 13.1 engine (import, generated column, FKs, cascades, idempotent re-run).
 
@@ -973,9 +979,9 @@ a real installation.
 
 | Harness | What it is | Checks |
 |---------|------------|--------|
-| `tests/dashboard-suite.php` (suite `dashboard`) | in-process assertions, part of `tests/run.php` | 77 |
-| `tests/dashboard-render.php` | renders every page in-process and asserts on the HTML: statistics match the database, no secret appears, a foreign id yields the not-found page | 88 |
-| `tests/http-dashboard.py` | real HTTP against a seeded database: auth boundary, cross-account isolation, CSRF, GET-never-mutates, release refusal, logout, post-logout denial | 83 |
+| `tests/dashboard-suite.php` (suite `dashboard`) | in-process assertions, part of `tests/run.php` | 81 |
+| `tests/dashboard-render.php` | renders every page in-process and asserts on the HTML: statistics match the database, no secret appears, a foreign id yields the not-found page | 89 |
+| `tests/http-dashboard.py` | real HTTP against a seeded database: auth boundary, cross-account isolation, CSRF, GET-never-mutates, release refusal, logout, post-logout denial | 86 |
 
 `tests/http-dashboard.py` needs the seeded preview database and a running
 server; `tests/dashboard.sh` arranges both.

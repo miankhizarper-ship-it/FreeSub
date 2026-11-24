@@ -216,6 +216,62 @@ $t->check('a verification step needs a real provider record and a sync time', (s
     return $without === [] && in_array('verified', array_column($with, 'key'), true);
 })());
 
+// A real row can be *written* in an order that differs from the order events
+// happened: the failure step reads subdomains.updated_at while the attempt step
+// reads the job's, and the job is written later. The page must still read
+// forwards in time, and must sort on the stored value, not the display string
+// (which starts with a month name and would sort alphabetically).
+$outOfOrder = DashboardStatus::timeline(
+    ['status' => 'failed', 'created_at' => '2026-01-01 10:00:00', 'updated_at' => '2026-01-01 10:10:00', 'provisioned_at' => null],
+    null,
+    [],
+    ['status' => 'failed', 'attempts' => 3, 'created_at' => '2026-01-01 10:05:00', 'updated_at' => '2026-01-03 09:00:00']
+);
+
+$t->check('the timeline is chronological even when the rows were written out of order', (static function () use ($outOfOrder): bool {
+    $raw = [];
+
+    foreach ($outOfOrder as $step) {
+        $raw[] = $step['key'];
+    }
+
+    return $raw === ['queued', 'failed', 'attempted'];
+})());
+
+$t->check('a timeline spanning December and January sorts by date, not month name', (static function (): bool {
+    $steps = DashboardStatus::timeline(
+        ['status' => 'failed', 'created_at' => '2026-12-20 10:00:00', 'updated_at' => '2026-12-20 10:20:00', 'provisioned_at' => null],
+        null,
+        [],
+        ['status' => 'failed', 'attempts' => 1, 'created_at' => '2026-12-20 10:05:00', 'updated_at' => '2027-01-05 10:00:00']
+    );
+
+    return array_column($steps, 'key') === ['queued', 'failed', 'attempted'];
+})());
+
+$t->check('steps sharing a timestamp keep their logical order', (static function (): bool {
+    // usort() is not stable, so a tie must be broken explicitly or the same
+    // data could render in a different order between requests.
+    $steps = DashboardStatus::timeline(
+        ['status' => 'failed', 'created_at' => '2026-01-01 10:00:00', 'updated_at' => '2026-01-01 10:00:00', 'provisioned_at' => null],
+        null,
+        [],
+        ['status' => 'failed', 'attempts' => 2, 'created_at' => '2026-01-01 10:00:00', 'updated_at' => '2026-01-01 10:00:00']
+    );
+
+    return array_column($steps, 'key') === ['queued', 'attempted', 'failed'];
+})());
+
+$t->check('timeline steps carry only the documented keys', (static function () use ($outOfOrder): bool {
+    foreach ($outOfOrder as $step) {
+        if (array_keys($step) !== ['key', 'label', 'at', 'state', 'detail']) {
+            return false;
+        }
+    }
+
+    return true;
+})());
+
 $t->check('the timeline never reads a provider identifier or an operator error', (static function (): bool {
     $source = (string) preg_replace('/^\s*(\*|\/\/).*$/m', '', (string) file_get_contents(FREESUB_ROOT . '/includes/services/Dashboard/DashboardStatus.php'));
 
