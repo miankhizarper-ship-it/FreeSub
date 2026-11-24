@@ -55,11 +55,27 @@ run on a networked machine.
 | Migration | **Pass** — additive, backfilled, guarded on both engines; no row deleted |
 | Live verification | **Open** — nothing has been run against the real Cloudflare API (§4b D-R1) |
 
-Nineteen issues were found across both deliveries (fourteen in Task 02, five in
-Task 03), all fixed; they are listed in §4 and §4b, because a report that only
-lists what currently looks fine is useless to the next reviewer. Risks that remain
-open are listed in §5 and §4b — the most important being that neither integration
-has been run against the live service it talks to.
+**Task 04 (reservation engine) — additional rows:**
+
+| Area | Result |
+|------|--------|
+| Input validation | **Pass** — one strict validator shared by the API, the dashboard and the reservation path; rejects rather than rewriting; raw input is validated, not a pre-cleaned copy |
+| Availability honesty | **Pass** after one fix — an unreachable provider returns `unknown`, never "available" (§4c R1); failures are not cached (§4c R2) |
+| Duplicate/race protection | **Pass** — one live reservation per `(domain, label)` enforced by the database (partial index on SQLite, nullable `live_guard` key on MySQL); every transition is a conditional `UPDATE` |
+| Quota | **Pass** — resolved server-side from three levels, counts pending reservations, bounded 0–500, audited |
+| Identity scoping | **Pass** — ownership is always in the SQL `WHERE`; an unknown or foreign id returns the same "not found" path, so ids cannot be enumerated |
+| DNS write path | **Pass** — no web page calls a provider write; provisioning is admin/CLI triggered, dry-run by default (§4c R5) |
+| Activation | **Pass** — a subdomain becomes `active` only after a read-back whose value is compared; one write site |
+| Failure handling | **Pass** — bounded backoff, no blind create retry, `last_error` visible to admins, cancelled jobs cannot be run |
+| Migration | **Pass** — additive, backfilled, idempotent on both engines; `live_guard` backfill preserves existing live reservations |
+| Live verification | **Open** — availability has never consulted a real zone, and provisioning has never written one (§4c R-1) |
+
+Twenty-six issues were found across the three deliveries (fourteen in Task 02,
+five in Task 03, seven in Task 04), all fixed; they are listed in §4, §4b and §4c,
+because a report that only lists what currently looks fine is useless to the next
+reviewer. Risks that remain open are listed in §5, §4b and §4c — the most
+important being that none of the three integrations has been run against the live
+service it talks to.
 
 ---
 
@@ -459,6 +475,103 @@ the subdomain's own FQDN is refused outright.
 
 ---
 
+## 4c. Reservation engine findings (Task 04)
+
+The defects found while building the availability and reservation engine, plus the
+controls it adds. Every "fixed" entry is carried by code and a regression test in
+the `reservations` suite.
+
+### R1 — `useCache` never reached the lookup, so a reservation could trust a stale "free" (High, fixed)
+
+`AvailabilityEngine::remote()` called the lookup seam with two arguments while
+`lookupAuthoritative()` declares three. PHP silently used the default
+(`$useCache = true`), so the boolean the reservation path passes to force an
+authoritative read was discarded — a name could be reserved on the strength of a
+cached "available" even though the zone had changed. The flag is now forwarded,
+and the suite asserts an uncached call reaches the provider.
+
+### R2 — Provider errors were one retry away from being cached (High, fixed)
+
+The first version of the fail-closed check injected a single `500`. The client
+retries reads twice, so the second attempt succeeded and the *successful* answer
+was cached — which is correct behaviour for the client and the wrong test. It also
+exposed the real hazard: a cache write must never be reachable from the error
+path. Failures now bypass `AvailabilityCache::put()` entirely and the suite scripts
+every attempt, then repeats the lookup to prove the error was not persisted.
+
+### R3 — The memoised DNS driver leaked between configurations (High, test-only symptom, production-correct fix)
+
+`DnsProvider::current()` cached its driver in a function-static. Correct for a
+request, wrong for a process that installs several configurations (the test
+runner): the reservation suite inherited the driver built by the DNS suite, so the
+zone looked unconfigured and provisioning "failed" for the wrong reason. Replaced
+with `DnsProvider::reset()`, called by the harness. In production the memoisation
+is still exactly one driver per request.
+
+### R4 — The dashboard's availability widget swallowed the reservation submit (High, would have blocked every reservation)
+
+The search helper called `preventDefault()` on submit, which is right for the
+landing-page search widget and catastrophic for the dashboard form whose submit
+button *is* the reservation. The helper is now `bindAvailabilitySearch()` with an
+`interceptSubmit` flag: the dashboard binds without interception, the landing page
+with it.
+
+### R5 — A policy-blocked name was reported as a typo (Medium, fixed)
+
+`SubdomainLabel` correctly refused `www`, `@` and `*`, but the engine passed the
+validator's status through unchanged, so all three came back as `invalid` — which
+tells a user to fix their spelling when the truth is "this name will never be
+yours". They now map to `reserved`, and the API documents that difference.
+
+### R6 — `error_for()` was called with its arguments reversed (Medium, fixed)
+
+`error_for(array $errors, string $field)`. The dashboard view passed
+`error_for('label', $errors)` and *every* dashboard render after a failed
+reservation threw a `TypeError` → HTTP 500. Caught by the end-to-end run, not by
+the unit-style checks, which is exactly why the HTTP harness exists.
+
+### R7 — SQLite could not accept the reservation insert after migration (High, fixed)
+
+The live-label guard added a `live_guard` column to the MySQL schema and to
+migration `2026_11_003`, but the **SQLite mirror schema** — which fresh installs
+and the whole test suite build from — was missed. Every reservation insert failed
+with "table reservations has no column named live_guard" on a fresh database.
+Fixed in the mirror schema *and* guarded by a migration step that adds the column,
+backfills `1` for pending/approved, and returns "already applied" on a re-run.
+
+### Controls added by this task (all regression-tested)
+
+| Control | Where | Test |
+|---------|-------|------|
+| One strict label validator; the raw value is validated, never a pre-cleaned copy | `SubdomainLabel::validate` | 10 rejection classes + 3 acceptance cases |
+| Reserved/apex/wildcard reported as policy, not as a typo | `AvailabilityEngine::check` | "a reserved label is explained" (HTTP + suite) |
+| Fail closed: provider error ⇒ `unknown`, `available = false`, HTTP `503` | `AvailabilityEngine`, `api/check.php` | "provider failure fails closed", "reported as unknown" |
+| Errors are never cached | `lookupAuthoritative` | "a failed lookup is not cached" |
+| Authoritative re-check on the reservation path | `ReservationService::create` | provisioning/availability assertions |
+| One live reservation per `(domain, label)`, enforced by the database | partial unique index / `live_guard` key + `Reservation::transition` | "two accounts cannot both reserve the same label", "exactly one live row exists" |
+| Ownership always in the SQL predicate; no id enumeration | `ReservationService::cancel`, `Subdomain::findForUser` | "cannot be cancelled by another account", "an unknown subdomain id is refused" |
+| Quota resolved server-side (user → domain → platform), counts pending requests | `SubdomainQuota` | quota acceptance/refusal, admin override |
+| Quota changes bounded (0–500) and audited | `SubdomainQuota::setLimit` | "a quota change is audited", "out-of-range refused" |
+| Approval cannot activate and cannot write DNS | `ReservationService::approve` | "approval creates a pending_dns subdomain", "approval does not create a DNS record" |
+| Activation only after a verified read-back; one write site | `ProvisioningQueue::provision` | "a record that cannot be verified is not accepted", "never activates" |
+| Provisioning refuse-to-guess without a configured target | `ProvisioningQueue::targetsFor`, CLI guard | "provisioning without a configured target fails" |
+| Atomic job claim; no blind create retry; bounded backoff | `ProvisioningQueue::claim` / `fail` | completed-job re-run, cancelled-job refusal, `last_error` visibility |
+| Provisioning is admin/CLI only; no web page writes to a zone | source check over every web entry point | "… does not call the provider directly" (4 pages) |
+| Additive migration preserving ids, reservations and FKs | `database/migrate.php` `2026_11_003` | fresh install, legacy upgrade, duplicate-block, re-run |
+
+### Risks that remain open (Task 04)
+
+| # | Risk | Severity | Status |
+|---|------|----------|--------|
+| R-1 | Availability has never consulted a real zone, and provisioning has never written one. | High impact, low likelihood (the shapes follow the documented API and are exercised against a scripted double) | Open by environment: no Cloudflare credentials |
+| R-2 | A reservation holds a label for up to `RESERVATION_TTL_HOURS` (168 h) while an administrator is unavailable; the sweep is manual. | Medium | Accepted: the admin queue shows lapsed rows and offers "Expire lapsed"; a scheduled call is a deliberate operator choice, not a default |
+| R-3 | Availability is cached for up to `AVAILABILITY_CACHE_TTL` (300 s), so a name created directly in Cloudflare may read as free for that window. Reservation re-checks without the cache, so the label cannot actually be taken. | Low | Accepted: bounded by the TTL; errors are not cached |
+| R-4 | The dashboard release path only cancels `pending_dns`/failed names; an `active` name must be released by support so its record is removed by the audited DNS path. | Low | Accepted: the alternative — deleting a record from a web form — is the risk this design exists to avoid |
+| R-5 | Provisioning jobs are claimed atomically but there is no queue daemon; a job sits until an admin or the CLI runs it. | Low | Accepted and intentional: automatic public DNS writes are out of scope |
+| R-6 | `provisioning_jobs.requested_by` uses `ON DELETE SET NULL`, so a deleted administrator leaves an unattributed (but still timestamped and audited) job. | Informational | Accepted: `audit_logs` retains the actor id and action |
+
+---
+
 ## 5. Open risks
 
 ### R1 — The integration is unverified against the live instance (High impact, open)
@@ -526,8 +639,9 @@ web route that accepts a password.
 | `dns-client` | 30 | zone verified / mismatched / not-active / unknown, 401 + 403 → auth, 429 → rate_limited, non-JSON body, `success=false` on HTTP 200, read retry after 5xx and after a transport failure, token never logged, 40-char scrub, path/identifier guards, forbidden type refused by the client |
 | `dns-lifecycle` | 53 | create → id persisted → audit, duplicate, cross-subdomain name, name outside the subdomain, private IPv4, **create 5xx not retried**, **write-landed-then-timeout reconciled without a duplicate**, update (+ private address, wrong domain), delete (ownership, single record, unmanaged record survives, soft delete, audited, idempotent, cross-domain refused), sync (unmanaged preserved, externally deleted reported, never recreated), provider availability incl. fail-open |
 | `dns-security` | 12 | factory degrades to null without credentials, token-without-zone refused, admin guard, CSRF ordering, no token in page source or template, no mutation control, plaintext base URL refused, interface unchanged |
-| **Total** | **448** | all green, no network, isolated SQLite |
-| `tests/http-clerk.sh` | **71 checks** | real HTTP: both pages render, no password field, every config key the JS reads, guest redirects, bridge hardening, full handoff, replay, admin denial, webhook signature/replay/idempotency, administrator migration, DNS diagnostics page (admin-only, no token, CSRF, no mutation, unconfigured-safe), logout |
+| `reservations` | 101 | strict validation (10 rejection classes), local-state availability, unmanaged-record blocking, TXT not blocking, fail-closed provider error (and not cached), cache reuse, request/duplicate/quota/cancel/expire, approval → `pending_dns` + one queued job, unverifiable record never activating, job cancel/retry, identity scoping, quota admin, two-account race, no web DNS write path |
+| **Total** | **549** | all green, no network, isolated SQLite |
+| `tests/http-clerk.sh` | **94 checks** | real HTTP: both pages render, no password field, every config key the JS reads, guest redirects, bridge hardening, full handoff, replay, admin denial, webhook signature/replay/idempotency, administrator migration, DNS diagnostics page (admin-only, no token, CSRF, no mutation, unconfigured-safe), availability API (free/reserved/malformed), reserve → stored pending → no longer available, release refused for a foreign id, reservation queue and quota controls (admin-only, CSRF, no token), logout |
 
 Not covered by automated tests, and why: rendering of the Clerk components
 (themselves) needs a browser and network access to the frontend API; Google
@@ -644,19 +758,23 @@ unproven, however green the local suites are.
 
 ## 9. Verdict
 
-**`READY FOR LIVE CLERK TEST`** (Task 02) and **`DNS ENGINE READY FOR LIVE
-CLOUDFLARE TEST`** (Task 03) — neither is production-ready.
+**`READY FOR LIVE CLERK TEST`** (Task 02), **`DNS ENGINE READY FOR LIVE
+CLOUDFLARE TEST`** (Task 03) and **`RESERVATION ENGINE READY FOR LIVE CLOUDFLARE
+TEST`** (Task 04) — none is production-ready, for the same single reason: no part
+of this system has been exercised against the live services it talks to.
 
 What that means concretely:
 
-* Every control this task asked for is implemented, and each one has a
-  regression test that would fail if it were removed. 448 unit/integration
-  assertions and 71 end-to-end HTTP checks pass, the latter also with
+* Every control these tasks asked for is implemented, and each one has a
+  regression test that would fail if it were removed. 549 unit/integration
+  assertions and 94 end-to-end HTTP checks pass, the latter also with
   `APP_DEBUG=false`.
-* Fourteen defects were found across implementation and this review, including
-  one **Critical** (an administrator row could be inherited by a web sign-in,
-  §4 F12) and two that would have broken sign-in entirely (§4 F1, F11). All are
-  fixed and covered.
+* Twenty-six defects were found across implementation and review, including one
+  **Critical** (an administrator row could be inherited by a web sign-in, §4 F12)
+  and two that would have broken sign-in entirely (§4 F1, F11). Seven came from
+  Task 04 (§4c), including one that would have blocked every reservation (§4c R4)
+  and one that let a reservation trust a stale "free" (§4c R1). All are fixed and
+  covered.
 * No live Clerk call has been made. That is the only reason this is not
   production-ready: the integration is unproven at the one boundary the local
   suites cannot reach — a real instance minting a real `freesub_handoff` token and
@@ -674,11 +792,33 @@ The engine is safe to ship in this state precisely because it cannot write from
 the web: `DNS_PROVIDER=none` (or a missing token/zone) leaves every operation
 disabled, and the admin page can only read.
 
+**Task 04 (reservation engine) status, reported separately:**
+
+| Claim | Status |
+|-------|--------|
+| `MOCK TESTS PASSED` | **yes** — 101 reservation assertions (549 total), scripted Cloudflare transport, no credentials |
+| `END-TO-END HTTP` | **yes** — 94 checks, including reserve → approve → queue → run |
+| `MIGRATIONS APPLIED` | **yes** — fresh install, pre-Task-04 upgrade, duplicate-block path, idempotent re-run; MySQL DDL proven separately |
+| `LIVE ZONE READ FOR AVAILABILITY` | **no** — no Cloudflare credentials here |
+| `DNS PROVISIONING VERIFIED AGAINST A REAL ZONE` | **no** — deliberately not attempted |
+
+`RESERVATION ENGINE READY FOR LIVE CLOUDFLARE TEST` — for the same reason as
+Task 03, and with the same mitigation: no web page can write a record, no
+reservation can activate a name, and with `DNS_PROVIDER=none` the queue refuses
+to run at all. The failure mode of this build in an unconfigured environment is
+"nothing happens and the queue says why", which is the only acceptable one.
+
 For Task 03, the equivalent next step is an operator run of
 `FREESUB_DNS_LIVE=1 … php tests/run.php dns-live` followed by
 `php database/dns-sync.php` against the real `kharcha.info` zone — both read-only.
 Only after that should anyone consider a deliberate create/read-back/delete on a
 throwaway name, and only then may `DNS MUTATIONS VERIFIED` be claimed.
+
+For Task 04, the sequence is: set `DNS_PROVIDER=cloudflare`, a token, a zone id
+and `DNS_PROVISIONING_A`; confirm the zone with `php database/dns-sync.php
+--dry-run`; reserve a throwaway label and approve it; then
+`php database/provision.php --run --job=<id>` and verify the record exists in the
+dashboard *and* resolves. Only then may `DNS PROVISIONING VERIFIED` be claimed.
 
 To move to `READY FOR PRODUCTION`, complete §8.3 items 1–7 on a networked
 machine. Nothing in the code should need to change; if something does, it is

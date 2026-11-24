@@ -3,7 +3,11 @@
 declare(strict_types=1);
 
 /**
- * Authenticated dashboard: reserve, release and track subdomains.
+ * Authenticated dashboard: search, reserve, track and cancel.
+ *
+ * Every read and write below is scoped to `Auth::id()` — the identity resolved
+ * server-side from the Clerk session. There is no code path that accepts a user
+ * id from the request.
  */
 
 require_once __DIR__ . '/includes/bootstrap.php';
@@ -22,47 +26,49 @@ if (is_post()) {
         $domainId = (int) input('domain_id', 0);
         $purpose = (string) input('purpose', '');
 
-        $normalised = SubdomainService::normaliseLabel($label);
-        $error = Validator::subdomainLabel($normalised);
+        $domain = $domainId > 0 ? Domain::find($domainId) : ($domains[0] ?? null);
 
-        if ($error !== null) {
-            flash('error', $error);
+        if ($domain === null || !($domain['is_active'] ?? false)) {
+            flash('error', 'That extension is not available.');
             redirect('/dashboard.php#reserve');
         }
 
-        if ($domainId <= 0 && $domains !== []) {
-            $domainId = (int) $domains[0]['id'];
+        // Server-side throttle: the form is not the only way in, so the limit is
+        // applied to the action, not to the widget. Keyed by the authenticated
+        // user id, never by anything the browser sent.
+        if (!rate_limit_hit('reserve:' . $userId, 10, 300)) {
+            flash('error', 'You are sending requests too quickly. Please wait a few minutes and try again.');
+            redirect('/dashboard.php#reserve');
         }
 
-        $result = SubdomainService::reserve($user, $normalised, $domainId, $purpose !== '' ? $purpose : null);
+        $result = ReservationService::create($user, $label, $domain, $purpose);
 
-        flash($result['ok'] ? 'success' : 'error', (string) $result['message']);
-        redirect('/dashboard.php' . ($result['ok'] ? '#reservations' : '#reserve'));
+        if ($result['ok']) {
+            audit_log('subdomain.reservation_created', $userId, ['fqdn' => $result['fqdn'] ?? null], 'reservation', (int) $result['reservation_id'], 'Reservation created');
+            flash('success', (string) $result['message']);
+            redirect('/dashboard.php#reservations');
+        }
+
+        flash('error', (string) $result['message']);
+
+        if (isset($result['errors']) && is_array($result['errors'])) {
+            flash_errors($result['errors']);
+        }
+
+        flash_old_input(['label' => $label, 'purpose' => $purpose, 'domain_id' => (string) $domain['id']]);
+        redirect('/dashboard.php#reserve');
     }
 
     if ($action === 'cancel_reservation') {
-        $id = (int) input('id', 0);
-        $reservation = Reservation::find($id);
-
-        if ($reservation === null || (int) $reservation['user_id'] !== $userId) {
-            flash('error', 'That reservation could not be found.');
-            redirect('/dashboard.php');
-        }
-
-        if ((string) $reservation['status'] !== 'pending') {
-            flash('warning', 'Only pending reservations can be cancelled.');
-            redirect('/dashboard.php');
-        }
-
-        Reservation::updateStatus($id, 'cancelled', null, 'Cancelled by the user.');
-        audit_log('subdomain.reservation_cancelled', $userId, ['reservation_id' => $id], 'reservation', $id, 'Reservation cancelled');
-
-        flash('success', 'Reservation cancelled.');
-        redirect('/dashboard.php');
+        $result = ReservationService::cancel($user, (int) input('id', 0));
+        flash($result['ok'] ? 'success' : 'error', (string) $result['message']);
+        redirect('/dashboard.php#reservations');
     }
 
     if ($action === 'release_subdomain') {
         $id = (int) input('id', 0);
+
+        // Scoped lookup: another user's id returns null, so nothing is disclosed.
         $subdomain = Subdomain::findForUser($id, $userId);
 
         if ($subdomain === null) {
@@ -71,14 +77,17 @@ if (is_post()) {
         }
 
         if ((string) $subdomain['status'] === 'active') {
-            flash('warning', 'Active subdomains are released by support so DNS records are cleaned up safely. Please contact us.');
+            // Releasing a live name needs DNS cleanup, which is a support action
+            // in this build. Saying so is better than silently leaving a record.
+            flash('warning', 'Active subdomains are released by support so the DNS record is removed safely. Please contact us.');
             redirect('/dashboard.php');
         }
 
+        ProvisioningQueue::cancelForSubdomain($id, null);
         Subdomain::deleteForUser($id, $userId);
         audit_log('subdomain.released', $userId, ['fqdn' => $subdomain['fqdn']], 'subdomain', $id, 'Subdomain released');
 
-        flash('success', 'Subdomain released.');
+        flash('success', 'Release requested. The name will free up shortly.');
         redirect('/dashboard.php');
     }
 
@@ -86,22 +95,33 @@ if (is_post()) {
     redirect('/dashboard.php');
 }
 
-$prefillLabel = SubdomainService::normaliseLabel((string) input('label', ''));
+$prefillLabel = (string) input('label', '');
 $prefillDomainId = (int) input('domain_id', 0);
+$selectedDomain = null;
 
-$subdomains = Subdomain::forUser($userId);
-$reservations = Reservation::forUser($userId);
-$quotaLimit = (int) ($domains[0]['subdomain_quota'] ?? config('subdomains.default_quota', 5));
-$quotaUsed = Subdomain::countForUser($userId);
+foreach ($domains as $candidate) {
+    if ($prefillDomainId > 0 && (int) $candidate['id'] === $prefillDomainId) {
+        $selectedDomain = $candidate;
+    }
+}
+
+$selectedDomain ??= $domains[0] ?? null;
+$quota = SubdomainQuota::summary($user, $selectedDomain);
+$errors = errors();
+$buckets = ReservationService::dashboard($userId);
 
 view('dashboard', [
     'authUser' => $user,
-    'subdomains' => $subdomains,
-    'reservations' => $reservations,
+    'subdomains' => $buckets['active'],
+    'reservations' => $buckets['pending'],
+    'rejected' => $buckets['rejected'],
+    'historyRows' => $buckets['history'],
     'domains' => $domains,
-    'quotaLimit' => $quotaLimit,
-    'quotaUsed' => $quotaUsed,
+    'quota' => $quota,
+    'quotaLimit' => $quota['limit'],
+    'quotaUsed' => $quota['used'],
     'welcome' => input('welcome') === '1',
+    'errors' => $errors,
     'prefillLabel' => $prefillLabel,
     'prefillDomainId' => $prefillDomainId,
     'pageTitle' => 'Dashboard',

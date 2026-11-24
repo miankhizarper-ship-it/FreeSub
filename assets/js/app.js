@@ -62,25 +62,28 @@
     }
 
     /* ---------------------------- Search -------------------------------- */
-    function initSearch() {
-        var form = doc.querySelector('[data-subdomain-search]');
-
-        if (!form) {
-            return;
-        }
-
-        var input = form.querySelector('input[name="label"]');
-        var select = form.querySelector('select[name="domain_id"]');
-        var results = doc.querySelector('[data-search-results]');
-        var status = doc.querySelector('[data-search-status]');
-        var endpoint = form.getAttribute('data-endpoint') || 'api/check.php';
+    /**
+     * Wire one availability search.
+     *
+     * Factored out because it is used twice: the landing-page search and the
+     * dashboard's reserve form. Both must debounce and abort stale requests, and
+     * both must let the server — never the browser — decide availability.
+     */
+    function bindAvailabilitySearch(options) {
+        var form = options.form;
+        var input = options.input;
+        var select = options.select || null;
+        var results = options.results;
+        var status = options.status || null;
+        var endpoint = options.endpoint || 'api/check.php';
+        var debounce = typeof options.debounce === 'number' ? options.debounce : 420;
+        // The landing-page form is a search widget, so its submit is swallowed.
+        // The dashboard form's submit button is the real reservation action and
+        // must reach the server untouched.
+        var interceptSubmit = options.interceptSubmit !== false;
         var timer = null;
         var controller = null;
         var lastQuery = '';
-
-        if (!input || !results) {
-            return;
-        }
 
         function icon(name) {
             return '<i data-lucide="' + name + '"></i>';
@@ -104,10 +107,17 @@
         }
 
         function renderResult(payload) {
+            // Four visual states, because they mean four different things to the
+            // person reading them: free, blocked by policy/typo, taken, and
+            // "we could not check" (retryable — never shown as taken, and never
+            // as available).
             var state = payload.status === 'available' ? 'is-available'
-                : (payload.status === 'invalid' || payload.status === 'unavailable' ? 'is-neutral' : 'is-taken');
+                : (payload.status === 'invalid' || payload.status === 'unavailable' || payload.status === 'reserved'
+                    ? 'is-neutral'
+                    : (payload.status === 'unknown' ? 'is-neutral' : 'is-taken'));
             var iconName = payload.status === 'available' ? 'check-circle-2'
-                : (payload.status === 'invalid' ? 'info' : 'x-circle');
+                : (payload.status === 'invalid' || payload.status === 'reserved' ? 'info'
+                    : (payload.status === 'unknown' ? 'wifi-off' : 'x-circle'));
             var fqdn = payload.fqdn || payload.label || '';
 
             var html = '<div class="search-result-card ' + state + '" role="status" aria-live="polite">' +
@@ -209,14 +219,64 @@
         if (select) {
             select.addEventListener('change', function () { run(true); });
         }
-        form.addEventListener('submit', function (event) {
-            event.preventDefault();
-            run(true);
-        });
+        if (interceptSubmit) {
+            form.addEventListener('submit', function (event) {
+                event.preventDefault();
+                run(true);
+            });
+        }
 
         if (input.value.trim() !== '') {
             run(true);
         }
+    }
+
+    /** The landing-page search (larger, its own results container). */
+    function initSearch() {
+        var form = doc.querySelector('[data-subdomain-search]');
+
+        if (!form) {
+            return;
+        }
+
+        bindAvailabilitySearch({
+            form: form,
+            input: form.querySelector('input[name="label"]'),
+            select: form.querySelector('select[name="domain_id"]'),
+            results: doc.querySelector('[data-search-results]'),
+            status: doc.querySelector('[data-search-status]'),
+            endpoint: form.getAttribute('data-endpoint')
+        });
+    }
+
+    /**
+     * The dashboard reserve form: checks the typed label and shows the verdict
+     * inline. It never enables or disables submission based on the answer — the
+     * server re-checks everything on POST, so a stale "available" cannot be used
+     * to book a taken name.
+     */
+    function initReserveSearch() {
+        var form = doc.querySelector('[data-reserve-form]');
+
+        if (!form) {
+            return;
+        }
+
+        var input = form.querySelector('[data-availability-input]');
+        var results = form.querySelector('[data-availability-results]');
+
+        if (!input || !results) {
+            return;
+        }
+
+        bindAvailabilitySearch({
+            form: form,
+            input: input,
+            select: form.querySelector('[data-availability-domain]'),
+            results: results,
+            debounce: 350,
+            interceptSubmit: false
+        });
     }
 
     /* ---------------------------- Password ------------------------------ */
@@ -280,6 +340,7 @@
         initHeader();
         initReveal();
         initSearch();
+        initReserveSearch();
         initPasswords();
         initConfirms();
     }

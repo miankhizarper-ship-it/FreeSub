@@ -49,6 +49,9 @@ function dns_test_environment(array $overrides = []): CloudflareTestDouble
 
     // The double is invokable, but the seam is typed as ?Closure.
     CloudflareApiClient::setDefaultTransport(Closure::fromCallable($double));
+
+    // Drop any driver memoised under an earlier configuration in this process.
+    DnsProvider::reset();
     DnsLog::reset();
 
     return $double;
@@ -58,6 +61,7 @@ function dns_test_environment(array $overrides = []): CloudflareTestDouble
 function dns_test_teardown(): void
 {
     CloudflareApiClient::setDefaultTransport(null);
+    DnsProvider::reset();
     unset($GLOBALS['FREESUB_CONFIG_OVERRIDE']);
     DnsLog::reset();
 }

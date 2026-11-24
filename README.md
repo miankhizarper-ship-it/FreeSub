@@ -18,6 +18,7 @@ FreeSub lets registered users search for a subdomain on a root domain the platfo
 - [Project structure](#project-structure)
 - [Authentication (Clerk)](#authentication-clerk)
 - [DNS engine (Cloudflare)](#dns-engine-cloudflare)
+- [Subdomain availability & reservations](#subdomain-availability--reservations)
 - [Security model](#security-model)
 - [How root domains work](#how-root-domains-work)
 - [Tests](#tests)
@@ -54,13 +55,24 @@ FreeSub lets registered users search for a subdomain on a root domain the platfo
 **Dashboard**
 
 - Quota meter, pending-request count, extension count, account summary.
-- Reservation form (validates, re-checks availability inside a transaction, enforces quota).
-- Subdomain list with explicit statuses (`pending_dns`, `active`, `suspended`, `failed`, `terminated`), reservation history and cancellation.
+- Reserve form with **inline, debounced availability** — the same engine behind
+  the landing-page search, so the two can never disagree.
+- Strict server-side validation of every submission (the browser check is a
+  courtesy, not a control), quota enforcement, duplicate-request protection.
+- Subdomain list with explicit statuses (`pending_dns`, `active`, `suspended`, `failed`, `terminated`),
+  pending/approved/rejected buckets, full reservation history and cancellation.
+- Everything is scoped to the Clerk identity resolved server-side; no request
+  parameter selects the account.
 
 **Admin**
 
 - Overview with platform metrics and queue snapshots.
-- Reservation queue: approve (creates a `pending_dns` subdomain, never "active"), reject, filter by status.
+- Reservation queue: approve (creates a `pending_dns` subdomain **and one queued
+  job**, never "active"), reject with a reason, filter by status/extension, search
+  by label or e-mail, expire lapsed requests on demand.
+- DNS provisioning queue: run / retry / cancel a job, see attempts and the last
+  error for every failure. Nothing runs automatically.
+- Per-user subdomain quota (override or reset to the default), with live usage.
 - Root-domain management: add apex domains (created as `draft` so nothing is offered before DNS is ready), toggle availability, change registration status.
 - User directory with search and suspend/activate (self-suspension blocked).
 - Abuse triage: reviewing → resolved/dismissed with a resolution note.
@@ -68,7 +80,9 @@ FreeSub lets registered users search for a subdomain on a root domain the platfo
 
 **Data layer**
 
-- Nine tables (seven domain/user tables plus `clerk_handoffs` and `clerk_sessions`) with primary keys, foreign keys, unique constraints, indexes, `created_at`/`updated_at` (with `ON UPDATE CURRENT_TIMESTAMP` on MySQL).
+- Ten tables (eight domain/user tables plus `clerk_handoffs` and `clerk_sessions`) with primary keys, foreign keys, unique constraints, indexes, `created_at`/`updated_at` (with `ON UPDATE CURRENT_TIMESTAMP` on MySQL).
+- `reservations.live_guard` gives MySQL a partial unique index: `(domain_id, label, live_guard)` with `1` for pending/approved and `NULL` otherwise, so a label can never be held by two live requests — while any number of rejected/cancelled/expired rows keep their history.
+- `provisioning_jobs` is the DNS queue: one row per approved subdomain, with attempt count, backoff timestamp and last error.
 - Multi-domain ready: extensions are rows, the UI and API read from the table, adding a domain needs no code change.
 - Generated `extension` column (MySQL) derived from `root_domain`.
 - DNS records stored as *desired state* only; `dns_records.provider_record_id` is reserved for the future Cloudflare sync.
@@ -581,6 +595,124 @@ API*, not that a live zone accepts it.
 
 ---
 
+## Subdomain availability & reservations
+
+The reservation engine answers one question — *may this label be taken, right
+now?* — and then holds the answer while a human reviews it. It is deliberately
+boring: one engine, one queue, no background daemon.
+
+### Who decides "available"
+
+`includes/services/Subdomain/AvailabilityEngine.php` checks, cheapest first, and
+stops at the first decisive answer:
+
+| # | Source | Meaning |
+|---|--------|---------|
+| 1 | Validation rules | reserved label, wildcard, apex, malformed, wrong root |
+| 2 | `subdomains` | already provisioned, or already waiting for DNS |
+| 3 | `dns_records` | we created a record for this name |
+| 4 | `reservations` | a live request holds it |
+| 5 | Cloudflare (live zone) | somebody else created a record here |
+
+Two rules matter more than speed:
+
+- **Never a false "available".** If step 5 cannot be answered and a zone is
+  configured, the answer is `unknown` (unavailable, HTTP `503` from the API), not
+  "free". An outage must never look like an opportunity.
+- **Never a Cloudflare call per keystroke.** Answers are cached per
+  `(zone, name)` in `storage/cache/availability` with a TTL, failures are never
+  cached, and the reservation path bypasses the cache and re-reads the zone.
+
+TXT/MX records do not block a name (SPF and verification records are normal);
+A/AAAA/CNAME/NS do.
+
+### Statuses
+
+| Status | Where it comes from | Shown to the user as |
+|--------|---------------------|----------------------|
+| `available` | engine, after a live check | "available" |
+| `taken` | subdomains / records / live zone | "already taken" |
+| `pending` | a live reservation or `pending_dns` subdomain | "reserved / waiting for DNS" |
+| `reserved` | policy (reserved list, apex, wildcard) | "reserved, pick another" |
+| `invalid` | validation | the specific reason |
+| `unknown` | provider unreachable or zone not configured | "could not confirm, try again" |
+| `blocked` | root domain closed for registration | "not accepting names" |
+
+### The lifecycle
+
+```
+search ──► reserve (pending, TTL 168h) ──► admin approve ──► subdomain pending_dns
+                  │                                              │
+                  ├─ user cancels ──► cancelled                  │  admin/CLI runs the job
+                  ├─ review rejects ──► rejected                 ▼
+                  └─ TTL lapses ──► expired            record created ──► read back ──► active
+```
+
+- A reservation **never** creates a record and **never** marks a name active.
+- Approval creates a `pending_dns` subdomain and exactly one `provisioning_jobs` row.
+- The subdomain becomes `active` only after the record is read back from the
+  provider and its value compared — in `ProvisioningQueue::provision()`, the only
+  place that writes `active`.
+- A failure is recorded on the job with its reason and stays visible to admins.
+  Automatic retries are bounded (`PROVISIONING_MAX_ATTEMPTS`, default 5, with
+  exponential backoff); a create is never blindly retried.
+
+### Quota
+
+`SubdomainQuota` resolves the allowance per user: `users.subdomain_quota`
+(admin override) → `domains.subdomain_quota` → `subdomains.initial_quota`
+(default 2). Usage counts non-terminated subdomains **plus** pending/approved
+reservations, so queueing more requests than you could ever hold is impossible.
+An administrator can raise, lower or clear an override from **Admin → Users**;
+every change is audited (`admin.quota_updated`).
+
+### Provisioning (admin/CLI only)
+
+```
+php database/provision.php --status                 # inspect the queue
+php database/provision.php                          # dry run (default)
+php database/provision.php --run --limit=5          # run up to five jobs
+php database/provision.php --run --job=42           # run one job
+php database/provision.php --run --actor=you@x.com  # attribute the audit entry
+```
+
+- Dry run is the **default**; nothing is written without `--run`.
+- Each job is claimed with a conditional `UPDATE`, so two terminals cannot work
+  the same row, and a crashed worker's lock is recovered after
+  `PROVISIONING_LOCK_TIMEOUT`.
+- The worker refuses to run when the engine is disabled or no target is
+  configured — it does not guess an address. Where a subdomain points is set by
+  `DNS_PROVISIONING_A` / `DNS_PROVISIONING_AAAA` / `DNS_PROVISIONING_CNAME` on the
+  server; a user picks a name, never a destination.
+- Exit codes: `0` nothing failed, `2` at least one job failed, `1` refused to run.
+- The admin queue offers the same actions per job (run / retry / cancel) behind
+  admin auth and CSRF.
+
+### Removing a name
+
+Releasing a `pending_dns` or failed name cancels its queued jobs immediately. An
+**active** name is released through support, so the DNS record is deleted by the
+same audited path that created it. Releasing an active name from the browser is
+deliberately not offered: that would orphan a live record.
+
+### Verifying the reservation engine
+
+| Claim | How to prove it | Done here? |
+|-------|-----------------|------------|
+| `MOCKED TESTS PASSED` | `php tests/run.php reservations` — 101 assertions against SQLite + a scripted Cloudflare transport | **yes** |
+| `MIGRATIONS APPLIED` | `php database/migrate.php` on a copy of a pre-Task-04 database; rows, ids and foreign keys preserved | **yes** (SQLite, plus MySQL DDL proven separately) |
+| `LIVE CLOUDFLARE READ USED FOR AVAILABILITY` | a real token in `.env`, then `curl '/api/check.php?label=…'` and see `"authoritative": true` | **no** — no Cloudflare credentials in the delivery environment |
+| `DNS PROVISIONING VERIFIED AGAINST A REAL ZONE` | `php database/provision.php --run --job=…` on a throwaway name | **no** — not attempted; no credentials |
+
+The mocked suite covers strict validation (10 rejection classes), local-state
+availability, unmanaged-record blocking, TXT not blocking, fail-closed on
+provider error, cache behaviour, request/duplicate/quota/cancel/expire flows,
+approval creating `pending_dns` only, a record that cannot be read back never
+activating, job cancellation and retry, identity scoping, quota administration
+and a two-account race on one label.
+
+---
+
 ## Security model
 
 **Authentication.** Clerk handles every credential: registration, sign-in, Google OAuth, e-mail verification and password recovery all happen inside Clerk's components mounted on our own pages with the official `clerk-js` browser build. FreeSub stores **no passwords for web users**. See [Authentication](#authentication-clerk) for the flow. Sessions regenerate on login/logout and are bound to a fingerprint of the client; the stored user is re-loaded from the database on every request, so a suspended, deleted or re-linked account loses access immediately.
@@ -654,13 +786,19 @@ Suites:
 | `dns-security` | factory degrades without credentials, admin-only + CSRF-wrapped page, no token in source/view, no mutation on the page, interface unchanged |
 | `dns-live` | optional read-only check against a real zone (needs `FREESUB_DNS_LIVE=1` and real credentials; skipped otherwise) |
 | `subdomains` | labels, reservations, quota, duplicate fqdn, no DNS on reservation |
+| `reservations` | Task 04 engine: strict validation, availability against local state and a scripted zone, fail-closed provider errors, not cached, cache reuse, request/cancel/approve/reject/expire, quota, provisioning verification (run/retry/cancel), CLI guard rules, identity scoping, two-account race |
 | `audit` | audit trail and abuse reports |
 | `views` | every view/link/redirect target exists |
 | `http` | HTTP journeys (needs a running server) |
 
-Current status: **448 assertions green** on PHP 8.5 with SQLite, plus **71 end-to-end HTTP checks** in `tests/http-clerk.sh`. The MySQL schema in `database/schema.sql` was validated against a real MariaDB 13.1 engine (import, generated column, FKs, cascades, idempotent re-run).
+Current status: **549 assertions green** on PHP 8.5 with SQLite, plus **94 end-to-end HTTP checks** in `tests/http-clerk.sh`. The MySQL schema in `database/schema.sql` was validated against a real MariaDB 13.1 engine (import, generated column, FKs, cascades, idempotent re-run).
 
 The tests use a throwaway database file (`storage/test-<pid>.sqlite`) and delete it afterwards. They never touch production data.
+
+The `reservations` suite reuses that double to drive provisioning end to end:
+approve → queued job → run → record created → read back → `active`, plus the
+negative cases (no target configured, a write that lands but whose response
+dies, a job cancelled mid-flight).
 
 The DNS suites need no network and no Cloudflare credential: the API is replaced
 at `CloudflareApiClient::setDefaultTransport()` by an in-memory double
@@ -677,15 +815,22 @@ The Clerk suites need no network and no real Clerk secret: tokens are signed wit
 
 Tracked in [`TASKS.md`](TASKS.md). Highlights:
 
-1. **DNS provisioning workflow** — the Cloudflare driver is built and tested; what remains is the decision to enable public registration: a queue/CLI worker that reconciles `dns_records` and flips subdomains to `active` only after a verified record exists.
-2. **Transactional email** for reservation/subdomain notifications (account e-mail verification and password reset are handled by Clerk).
-3. **Public API tokens** for users (programmatic reservation management) with scoped keys.
-4. **Admin audit log browser** with filtering and export.
-5. **DNS pre-check** (wildcard detection, NS delegation check) before a domain is marked `ready`.
-6. **i18n** and a full RTL stylesheet pass.
-7. **Nginx sample config** in addition to `.htaccess`.
-8. **Observability**: structured logs, health endpoint, retention policy for `audit_logs`.
-9. **UI**: screenshot regression tests once a headless browser is available in CI.
+1. **Enable public registration** — the engine, the queue and the CLI worker are
+   built and tested against a scripted provider; what remains is an operator
+   decision: a verified zone, a provisioning target, then `--run` on a throwaway
+   name before opening the form.
+2. **Scheduled worker** — nothing provisions on a timer today, deliberately. A
+   cron entry that calls `php database/provision.php --run` would be safe (jobs
+   are claimed atomically) but it makes DNS writes automatic, which this build
+   refuses to do by default. Decide deliberately.
+3. **Transactional email** for reservation/subdomain notifications (account e-mail verification and password reset are handled by Clerk).
+4. **Public API tokens** for users (programmatic reservation management) with scoped keys.
+5. **Admin audit log browser** with filtering and export.
+6. **DNS pre-check** (wildcard detection, NS delegation check) before a domain is marked `ready`.
+7. **i18n** and a full RTL stylesheet pass.
+8. **Nginx sample config** in addition to `.htaccess`.
+9. **Observability**: structured logs, health endpoint, retention policy for `audit_logs`.
+10. **UI**: screenshot regression tests once a headless browser is available in CI.
 
 ---
 

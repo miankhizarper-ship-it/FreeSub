@@ -192,6 +192,74 @@ replay.post(f"{BASE}/auth/handoff.php", data={"handoff_token": ticket, "_token":
 check("ticket cannot be replayed",
       replay.get(f"{BASE}/dashboard.php", allow_redirects=False).status_code in (302, 303))
 
+print("Subdomain search and reservation")
+
+# The public endpoint is the same engine the dashboard uses. It must answer for
+# a free label, refuse a reserved one, and never write anything.
+free = requests.get(f"{BASE}/api/check.php", params={"label": "e2e-free"})
+free_body = free.json() if free.status_code == 200 else {}
+check("availability API answers", free.status_code == 200, (free.status_code, free.text[:160]))
+check("availability API reports a free label as available", free_body.get("available") is True, free_body)
+check("availability API states its provenance", "authoritative" in free_body, list(free_body))
+check("availability API returns no credential", "sk_test" not in free.text)
+
+reserved_label = requests.get(f"{BASE}/api/check.php", params={"label": "www"})
+reserved_body = reserved_label.json() if reserved_label.status_code == 200 else {}
+check("availability API refuses a reserved label", reserved_body.get("available") is False, reserved_body)
+check("a reserved label is explained, not silently rejected",
+      reserved_body.get("status") == "reserved", reserved_body.get("status"))
+
+malformed = requests.get(f"{BASE}/api/check.php", params={"label": "Bad Label!"})
+malformed_body = malformed.json() if malformed.status_code == 200 else {}
+check("availability API rejects malformed input", malformed_body.get("available") is False, malformed_body)
+
+# Reservation through the dashboard form.
+dash_page = session.get(f"{BASE}/dashboard.php")
+check("dashboard exposes the reservation form", "reserve" in dash_page.text.lower())
+reserve_no_csrf = session.post(f"{BASE}/dashboard.php",
+                               data={"action": "reserve", "label": "e2e-reserved"},
+                               allow_redirects=False)
+check("reservation requires CSRF", reserve_no_csrf.status_code == 419, reserve_no_csrf.status_code)
+
+reserve_token = csrf(dash_page)
+accepted = session.post(
+    f"{BASE}/dashboard.php",
+    data={"action": "reserve", "label": "e2e-reserved", "domain_id": "1", "_token": reserve_token},
+    allow_redirects=False,
+)
+check("a valid reservation is accepted", accepted.status_code in (302, 303), accepted.status_code)
+
+after_reserve = session.get(f"{BASE}/dashboard.php")
+check("the reservation is listed for its owner", "e2e-reserved" in after_reserve.text)
+
+connection = db()
+pending_row = connection.execute(
+    "SELECT status, live_guard FROM reservations WHERE label = ? ORDER BY id DESC LIMIT 1",
+    ("e2e-reserved",),
+).fetchone()
+connection.close()
+check("the reservation is stored as pending", pending_row is not None and pending_row[0] == "pending", pending_row)
+check("the reservation holds the label", pending_row is not None and pending_row[1] == 1, pending_row)
+
+taken = requests.get(f"{BASE}/api/check.php", params={"label": "e2e-reserved"})
+taken_body = taken.json() if taken.status_code == 200 else {}
+check("a reserved label is no longer available", taken_body.get("available") is False, taken_body)
+
+# Identity scoping: another browser must not see it.
+stranger = requests.Session()
+stranger.get(f"{BASE}/login.php")
+stranger_dash = stranger.get(f"{BASE}/dashboard.php", allow_redirects=False)
+check("the list is not readable without a session", stranger_dash.status_code in (302, 303),
+      stranger_dash.status_code)
+
+# Releasing a name must not be possible through another account's id.
+release = session.post(
+    f"{BASE}/dashboard.php",
+    data={"action": "release_subdomain", "id": "999999", "_token": reserve_token},
+    allow_redirects=False,
+)
+check("an unknown subdomain id is refused", release.status_code in (302, 303), release.status_code)
+
 print("Authorization")
 check("normal user is denied the admin area",
       session.get(f"{BASE}/admin/index.php", allow_redirects=False).status_code in (302, 303, 403))
@@ -334,6 +402,49 @@ check("the connection test does not crash when unconfigured",
 
 check("a normal user is denied the DNS page",
       session.get(f"{BASE}/admin/dns.php", allow_redirects=False).status_code in (302, 303, 403))
+
+print("Reservation administration")
+# Same invariants as the DNS page: admin-only, CSRF-protected, no credential in
+# the HTML, and no control that would write a record straight from the browser.
+res_page = admin.get(f"{BASE}/admin/reservations.php")
+check("administrator can open the reservation queue", res_page.status_code == 200, res_page.status_code)
+check("the queue shows the provisioning section", "provisioning" in res_page.text.lower())
+check("the queue never renders a token value", "CLOUDFLARE_API_TOKEN=" not in res_page.text
+      and "Bearer " not in res_page.text and "sk_test" not in res_page.text)
+
+res_no_csrf = admin.post(f"{BASE}/admin/reservations.php",
+                         data={"action": "approve", "id": "1"}, allow_redirects=False)
+check("reservation actions require CSRF", res_no_csrf.status_code == 419, res_no_csrf.status_code)
+
+res_token = csrf(res_page)
+res_unknown = admin.post(f"{BASE}/admin/reservations.php",
+                         data={"action": "bogus", "id": "1", "_token": res_token},
+                         allow_redirects=False)
+check("an unknown reservation action is rejected", res_unknown.status_code in (302, 303),
+      res_unknown.status_code)
+check("a normal user is denied the reservation queue",
+      session.get(f"{BASE}/admin/reservations.php", allow_redirects=False).status_code in (302, 303, 403))
+
+users_page = admin.get(f"{BASE}/admin/users.php")
+check("administrator can open the user directory", users_page.status_code == 200, users_page.status_code)
+check("the directory exposes the quota control", 'name="quota"' in users_page.text)
+
+users_token = csrf(users_page)
+users_id = db()
+target = users_id.execute("SELECT id FROM users WHERE email = ?", ("handoff@clerk-test.local",)).fetchone()
+users_id.close()
+quota_update = admin.post(f"{BASE}/admin/users.php",
+                          data={"action": "quota", "id": str(target[0]) if target else "1",
+                                "quota": "7", "_token": users_token},
+                          allow_redirects=False)
+check("a quota can be set by an administrator", quota_update.status_code in (302, 303),
+      quota_update.status_code)
+
+if target:
+    verify = db()
+    stored = verify.execute("SELECT subdomain_quota FROM users WHERE id = ?", (target[0],)).fetchone()
+    verify.close()
+    check("the quota change is persisted", stored is not None and stored[0] == 7, stored)
 
 print("Logout")
 # Use the administrator session: it is the only one still valid at this point,

@@ -201,6 +201,18 @@ require_once FREESUB_ROOT . '/includes/services/Dns/DnsRecordValidator.php';
 require_once FREESUB_ROOT . '/includes/services/Dns/CloudflareDnsProvider.php';
 require_once FREESUB_ROOT . '/includes/services/Dns/DnsRecordRepository.php';
 require_once FREESUB_ROOT . '/includes/services/Dns/DnsManager.php';
+
+/* -------------------------------------------------------------------------
+ * Subdomain availability & reservation engine (Task 04).
+ * Order matters: the label rules are used by the availability engine, which is
+ * used by the reservation service, which is used by the provisioning queue.
+ * ---------------------------------------------------------------------- */
+require_once FREESUB_ROOT . '/includes/services/Subdomain/SubdomainLabel.php';
+require_once FREESUB_ROOT . '/includes/services/Subdomain/AvailabilityCache.php';
+require_once FREESUB_ROOT . '/includes/services/Subdomain/AvailabilityEngine.php';
+require_once FREESUB_ROOT . '/includes/services/Subdomain/SubdomainQuota.php';
+require_once FREESUB_ROOT . '/includes/services/Subdomain/ProvisioningQueue.php';
+require_once FREESUB_ROOT . '/includes/services/Subdomain/ReservationService.php';
 require_once FREESUB_ROOT . '/includes/services/SubdomainService.php';
 
 /* -------------------------------------------------------------------------

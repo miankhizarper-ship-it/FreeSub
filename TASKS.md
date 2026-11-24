@@ -185,29 +185,111 @@ stays disabled, and no subdomain is marked `active` by this work.
 
 | Claim | Status |
 |-------|--------|
-| Mocked test suites | **passed** (`php tests/run.php`, 448 assertions) |
+| Mocked test suites | **passed** (Task 03's 161 DNS assertions; 549 in the full run after Task 04) |
 | Live Cloudflare connection | **not verified** — no credentials in the delivery environment |
 | DNS mutations against a real zone | **not verified** — not attempted |
 
 To close the last two: follow [README → Verifying the integration](README.md#verifying-the-integration).
 
-## Task 03b — DNS provisioning workflow (Next)
+## Task 03b — DNS provisioning workflow (Done in Task 04)
 
-- [ ] Queue/CLI worker that provisions `pending` subdomains and flips them to
-      `active` only after the record reads back from the zone
-- [ ] DNS lookup confirmation (`A`/`AAAA`/`CNAME` resolution) before `active`
+Delivered as part of the reservation engine below:
+
+- [x] `provisioning_jobs` queue plus the `ProvisioningQueue` service
+- [x] CLI worker `database/provision.php` that flips a subdomain to `active`
+      only after the record reads back from the zone and the value matches
+- [x] Atomic job claiming, bounded backoff, stale-runner recovery, visible
+      failures (`last_error`) and safe cancellation
+- [x] Admin controls per job: run / retry / cancel, with counts and last error
+
+Still open:
+
 - [ ] Deletion workflow for released subdomains (remote record first, then
-      `terminated`), with the same ownership rules
+      `terminated`), with the same ownership rules — active names are released
+      through support today
 - [ ] Decide whether an operator may re-run sync with `--apply` for the
       `missing`/`modified` classes only
 
-## Task 04 — Accounts & email (Next)
+## Task 04 — Subdomain availability & reservation engine (Done, pending live verification)
+
+### Completed
+
+**Search & validation**
+- [x] `SubdomainLabel`: strict normalisation and validation (length, charset,
+      edge/double hyphens, wildcard, apex, reserved list + patterns, punycode,
+      non-ASCII, numeric-only, wrong root domain). Rejects; never silently rewrites
+- [x] `AvailabilityEngine`: ordered checks over `subdomains`, `dns_records`, live
+      reservations and the authoritative zone, with statuses
+      `available|taken|reserved|pending|invalid|unknown|blocked` and suggestions
+- [x] `AvailabilityCache`: per-`(zone, name)` disk cache with TTLs; **errors are
+      never cached**
+- [x] Fail closed: an unreachable provider yields `unknown` (and HTTP `503` from
+      `api/check.php`), never "available"
+- [x] Public API and dashboard search share the same engine, so they cannot disagree
+
+**Reservations**
+- [x] `ReservationService`: create (re-validate, re-check without cache, quota,
+      transaction, friendly duplicate handling), cancel (ownership in the WHERE),
+      approve, reject, expiry sweep, dashboard buckets, history
+- [x] `reservations.live_guard` + unique index: one live request per
+      `(domain, label)`, unlimited history
+- [x] Configurable TTL (`RESERVATION_TTL_HOURS`, default 168h) with an
+      administrator-triggered sweep, idempotent
+- [x] `SubdomainQuota`: per-user override → per-domain → platform default,
+      count includes pending reservations, bounded and audited
+
+**Provisioning**
+- [x] `ProvisioningQueue`: idempotent enqueue per subdomain, atomic claim,
+      run, retry (resets attempts, deliberately), cancel (refuses a completed
+      job), bounded backoff, `last_error` surfaced to admins
+- [x] Activation happens in exactly one place, after a read-back whose value is
+      compared to the stored record
+- [x] `database/provision.php`: dry run by default, `--status`, `--job`, `--limit`,
+      `--actor`; exits non-zero when a job fails
+- [x] **Admin/CLI triggered only** — no cron entry, no timer, no write on page load
+
+**UI**
+- [x] Dashboard: inline availability for the reserve form, quota meter, pending /
+      approved / rejected buckets, history, cancel, release (pending only)
+- [x] Admin reservation queue: filters, search, expiry sweep, approve/reject with
+      a reason, provisioning queue with run/retry/cancel and error visibility
+- [x] Admin users: per-account quota with live usage
+
+**Data & safety**
+- [x] Additive migration `2026_11_003` (+ `provisioning_jobs`): `users.subdomain_quota`,
+      `reservations.live_guard` with backfill, expiry index, unique live-label key,
+      `provisioning_jobs` table — SQLite and MySQL, idempotent, existing rows and
+      foreign keys preserved
+- [x] All scoping from the server-side Clerk identity; no request parameter
+      selects an account
+- [x] Tests: `reservations` suite (101 assertions) plus 23 new end-to-end HTTP checks
+
+### Verification status
+
+Separate lines, because they are very different claims:
+
+| Claim | Status |
+|-------|--------|
+| Mocked test suites | **passed** — 549 assertions in `php tests/run.php` (101 of them Task 04) |
+| End-to-end HTTP journeys | **passed** — 94 checks in `tests/http-clerk.sh` |
+| Migration on a pre-Task-04 database | **passed** — SQLite fresh, legacy upgrade, duplicate-block and idempotent re-run; MySQL DDL proven 9/9 separately |
+| Live Cloudflare read used for availability | **not verified** — no credentials in the delivery environment |
+| DNS provisioning against a real zone | **not verified** — deliberately not attempted |
+
+### Deliberately not implemented
+
+- Automatic/scheduled provisioning (would make public DNS writes automatic)
+- Wildcard DNS, nameserver changes, proxying
+- Customer hosting of any kind (no file manager, PHP, MySQL or mail hosting)
+- Releasing an `active` name from the browser (would orphan a live record)
+
+## Task 05 — Accounts & email (Next)
 
 - [ ] Transactional email for reservation status changes (account e-mail verification and password reset are handled by Clerk)
 - [ ] Optional 2FA (TOTP) for administrators (Clerk supports MFA; wire it into the instance policy)
 - [ ] Session/device management ("sign out everywhere") — `ClerkApiClient::revokeSession` is already available
 
-## Task 05 — Operations & hardening (Later)
+## Task 06 — Operations & hardening (Later)
 
 - [ ] Nginx sample configuration with the same denies and headers
 - [ ] Structured logging + log rotation; retention policy for `audit_logs`
@@ -218,7 +300,7 @@ To close the last two: follow [README → Verifying the integration](README.md#v
 - [ ] CI pipeline: lint (`php -l`), test suite, optional MySQL service container
 - [ ] Screenshot/visual regression tests once a headless browser is available
 
-## Task 06 — Product polish (Later)
+## Task 07 — Product polish (Later)
 
 - [ ] User-facing API keys for programmatic reservation management
 - [ ] Public status page for DNS incidents

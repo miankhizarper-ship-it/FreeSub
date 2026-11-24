@@ -45,6 +45,8 @@ CREATE TABLE IF NOT EXISTS `users` (
     `last_login_ip` VARCHAR(45) NULL DEFAULT NULL,
     `failed_login_attempts` SMALLINT UNSIGNED NOT NULL DEFAULT 0,
     `locked_until` DATETIME NULL DEFAULT NULL,
+    `subdomain_quota` SMALLINT UNSIGNED NULL DEFAULT NULL
+        COMMENT 'Per-account allowance; NULL falls back to the domain quota',
     `created_at` TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
     `updated_at` TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
     PRIMARY KEY (`id`),
@@ -151,6 +153,14 @@ CREATE TABLE IF NOT EXISTS `reservations` (
     KEY `reservations_domain_label_index` (`domain_id`, `label`, `status`),
     KEY `reservations_status_created_index` (`status`, `created_at`),
     KEY `reservations_reviewed_by_foreign` (`reviewed_by`),
+    KEY `reservations_expires_at_index` (`expires_at`),
+    -- A nullable stand-in for a partial unique index: MySQL has no WHERE clause
+    -- on UNIQUE, but a unique index ignores rows whose guard is NULL. The
+    -- application writes 1 for pending/approved and NULL otherwise, so at most
+    -- one *live* reservation can exist per label while history is preserved.
+    `live_guard` TINYINT UNSIGNED NULL DEFAULT NULL
+        COMMENT '1 while pending/approved, NULL otherwise (partial-unique emulation)',
+    UNIQUE KEY `reservations_live_label_unique` (`domain_id`, `label`, `live_guard`),
     CONSTRAINT `reservations_user_id_foreign` FOREIGN KEY (`user_id`)
         REFERENCES `users` (`id`) ON DELETE CASCADE ON UPDATE CASCADE,
     CONSTRAINT `reservations_domain_id_foreign` FOREIGN KEY (`domain_id`)
@@ -222,6 +232,33 @@ CREATE TABLE IF NOT EXISTS `dns_records` (
 -- ---------------------------------------------------------------------------
 -- audit_logs — append-only trail of security and admin relevant actions
 -- ---------------------------------------------------------------------------
+-- DNS provisioning queue (Task 04). An approved reservation creates a row here;
+-- a worker (admin page or CLI) turns it into a verified record. A subdomain only
+-- becomes `active` after the read-back in ProvisioningQueue::provision().
+CREATE TABLE IF NOT EXISTS `provisioning_jobs` (
+    `id` BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+    `subdomain_id` BIGINT UNSIGNED NOT NULL,
+    `domain_id` BIGINT UNSIGNED NOT NULL,
+    `fqdn` VARCHAR(190) NOT NULL,
+    `status` ENUM('pending', 'running', 'done', 'failed', 'cancelled') NOT NULL DEFAULT 'pending',
+    `attempts` SMALLINT UNSIGNED NOT NULL DEFAULT 0,
+    `last_error` VARCHAR(500) NULL DEFAULT NULL,
+    `available_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    `requested_by` BIGINT UNSIGNED NULL DEFAULT NULL,
+    `created_at` TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    `updated_at` TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    PRIMARY KEY (`id`),
+    KEY `provisioning_jobs_status_index` (`status`, `available_at`),
+    KEY `provisioning_jobs_subdomain_index` (`subdomain_id`),
+    KEY `provisioning_jobs_fqdn_index` (`fqdn`),
+    CONSTRAINT `provisioning_jobs_subdomain_id_foreign` FOREIGN KEY (`subdomain_id`)
+        REFERENCES `subdomains` (`id`) ON DELETE CASCADE ON UPDATE CASCADE,
+    CONSTRAINT `provisioning_jobs_domain_id_foreign` FOREIGN KEY (`domain_id`)
+        REFERENCES `domains` (`id`) ON DELETE RESTRICT ON UPDATE CASCADE,
+    CONSTRAINT `provisioning_jobs_requested_by_foreign` FOREIGN KEY (`requested_by`)
+        REFERENCES `users` (`id`) ON DELETE SET NULL ON UPDATE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
 CREATE TABLE IF NOT EXISTS `audit_logs` (
     `id` BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
     `user_id` BIGINT UNSIGNED NULL DEFAULT NULL,

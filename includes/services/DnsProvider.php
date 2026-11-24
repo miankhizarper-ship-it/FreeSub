@@ -123,14 +123,28 @@ final class DnsProvider
         return $provider;
     }
 
+    /** @var DnsProviderInterface|null Memoised driver for the current request. */
+    private static ?DnsProviderInterface $instance = null;
+
     public static function current(): DnsProviderInterface
     {
-        static $instance = null;
-
-        if ($instance === null) {
-            $instance = self::make();
+        if (self::$instance === null) {
+            self::$instance = self::make();
         }
 
-        return $instance;
+        return self::$instance;
+    }
+
+    /**
+     * Forget the memoised driver.
+     *
+     * Configuration is normally fixed for the life of a request, so the cache is
+     * correct in production. It is wrong in tests, where one process installs
+     * several configurations in sequence — a stale driver there would make the
+     * provider look unconfigured (or worse, configured with the wrong zone).
+     */
+    public static function reset(): void
+    {
+        self::$instance = null;
     }
 }

@@ -8,9 +8,11 @@ declare(strict_types=1);
  *   php database/migrate.php            apply (safe to re-run)
  *   php database/migrate.php --status   show what is already applied
  *
- * Two migrations are covered:
+ * Three migrations are covered:
  *   2026_11_001  Clerk identity (users.clerk_user_id, clerk_handoffs, ...)
  *   2026_11_002  DNS engine (dns_records.domain_id, dns_records.last_synced_at)
+ *   2026_11_003  Reservation engine (users.subdomain_quota, one live
+ *                reservation per label, reservation expiry index)
  *
  * It never drops a column, never deletes a row and never touches users.role.
  * On MySQL/MariaDB each step is guarded by an information_schema check, because
@@ -82,15 +84,46 @@ function mysql_column_nullable(string $table, string $column): bool
     ) === 'YES';
 }
 
+/**
+ * Existing rows can already violate the new "one live reservation per label"
+ * rule (it used to be checked only in PHP). Rather than fail the migration or
+ * delete somebody's request, duplicates are reported and left alone, and the
+ * unique index is simply not created until an operator resolves them.
+ *
+ * @return list<array<string, mixed>>
+ */
+function live_reservation_duplicates(): array
+{
+    return Database::select(
+        "SELECT domain_id, label, COUNT(*) AS n
+           FROM reservations
+          WHERE status IN ('pending', 'approved')
+          GROUP BY domain_id, label
+         HAVING COUNT(*) > 1"
+    );
+}
+
 $applied = 0;
 $skipped = 0;
 $failed = 0;
+$blocked = 0;
 
-$step = static function (string $label, callable $action) use (&$applied, &$skipped, &$failed, $statusOnly): void {
+$step = static function (string $label, callable $action) use (&$applied, &$skipped, &$failed, &$blocked, $statusOnly): void {
     try {
-        if ($action() === false) {
+        $outcome = $action();
+
+        if ($outcome === false) {
             echo "  = {$label} (already applied)\n";
             $skipped++;
+
+            return;
+        }
+
+        // A step may return an empty-blocked signal: it inspected the data and
+        // found a pre-existing condition an operator has to resolve first. That
+        // is neither "applied" nor "already applied", and it is never silent.
+        if ($outcome === 'blocked') {
+            $blocked++;
 
             return;
         }
@@ -357,6 +390,113 @@ if ($driver === 'sqlite') {
 
         return true;
     });
+
+    /* -- 2026_11_003 — Reservation engine ------------------------------ */
+
+    $step('users.subdomain_quota', static function () use ($statusOnly): bool {
+        if (in_array('subdomain_quota', sqlite_columns('users'), true)) {
+            return false;
+        }
+
+        if (!$statusOnly) {
+            Database::execute('ALTER TABLE users ADD COLUMN subdomain_quota INTEGER NULL');
+        }
+
+        return true;
+    });
+
+    $step('reservations.live_guard', static function () use ($statusOnly): bool {
+        $columns = array_map(
+            static fn (array $row): string => (string) $row['name'],
+            Database::select('PRAGMA table_info(reservations)')
+        );
+
+        if (in_array('live_guard', $columns, true)) {
+            return false;
+        }
+
+        if (!$statusOnly) {
+            Database::execute('ALTER TABLE reservations ADD COLUMN live_guard INTEGER NULL');
+            Database::execute("UPDATE reservations SET live_guard = 1 WHERE status IN ('pending', 'approved')");
+        }
+
+        return true;
+    });
+
+    $step('reservation expiry index', static function () use ($statusOnly): bool {
+        if (sqlite_index_exists('reservations_expires_at_index')) {
+            return false;
+        }
+
+        if (!$statusOnly) {
+            Database::execute('CREATE INDEX IF NOT EXISTS reservations_expires_at_index ON reservations (expires_at)');
+        }
+
+        return true;
+    });
+
+    $step('one live reservation per label', static function () use ($statusOnly): bool|string {
+        if (sqlite_index_exists('reservations_live_label_unique')) {
+            return false;
+        }
+
+        $duplicates = live_reservation_duplicates();
+
+        if ($duplicates !== []) {
+            // Leave the data alone and say so. Creating the index anyway would
+            // make the whole migration fail for a condition the operator can
+            // resolve in the admin queue.
+            echo '      · ' . count($duplicates) . " label(s) already have more than one live reservation:\n";
+
+            foreach (array_slice($duplicates, 0, 5) as $duplicate) {
+                echo '        domain ' . (int) $duplicate['domain_id'] . ', label '
+                    . (string) $duplicate['label'] . ', ' . (int) $duplicate['n'] . " live row(s)\n";
+            }
+
+            echo "      · resolve them (reject/cancel the extra rows) and re-run. Index not created yet.\n";
+
+            return 'blocked';
+        }
+
+        if (!$statusOnly) {
+            // Partial index: only rows that hold a label are constrained, so
+            // history (cancelled/rejected/expired) stays unconstrained.
+            Database::execute(
+                "CREATE UNIQUE INDEX IF NOT EXISTS reservations_live_label_unique
+                     ON reservations (domain_id, label)
+                  WHERE status IN ('pending', 'approved')"
+            );
+        }
+
+        return true;
+    });
+
+    $step('provisioning_jobs table', static function () use ($statusOnly): bool {
+        if ((int) Database::scalar("SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'provisioning_jobs'") > 0) {
+            return false;
+        }
+
+        if (!$statusOnly) {
+            Database::execute("CREATE TABLE provisioning_jobs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                subdomain_id INTEGER NOT NULL REFERENCES subdomains (id) ON DELETE CASCADE,
+                domain_id INTEGER NOT NULL REFERENCES domains (id) ON DELETE RESTRICT,
+                fqdn VARCHAR(190) NOT NULL,
+                status TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending', 'running', 'done', 'failed', 'cancelled')),
+                attempts INTEGER NOT NULL DEFAULT 0,
+                last_error VARCHAR(500) NULL,
+                available_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                requested_by INTEGER NULL REFERENCES users (id) ON DELETE SET NULL,
+                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+            )");
+            Database::execute('CREATE INDEX IF NOT EXISTS provisioning_jobs_status_index ON provisioning_jobs (status, available_at)');
+            Database::execute('CREATE INDEX IF NOT EXISTS provisioning_jobs_subdomain_index ON provisioning_jobs (subdomain_id)');
+            Database::execute('CREATE INDEX IF NOT EXISTS provisioning_jobs_fqdn_index ON provisioning_jobs (fqdn)');
+        }
+
+        return true;
+    });
 } else {
     $step('users.clerk_user_id', static function () use ($statusOnly): bool {
         if (mysql_has_column('users', 'clerk_user_id')) {
@@ -546,6 +686,124 @@ if ($driver === 'sqlite') {
 
         return true;
     });
+
+    /* -- 2026_11_003 — Reservation engine ------------------------------ */
+
+    $step('users.subdomain_quota', static function () use ($statusOnly): bool {
+        if (mysql_has_column('users', 'subdomain_quota')) {
+            return false;
+        }
+
+        if (!$statusOnly) {
+            Database::execute(
+                'ALTER TABLE users ADD COLUMN subdomain_quota SMALLINT UNSIGNED NULL DEFAULT NULL
+                 COMMENT \'Per-account allowance; NULL falls back to the domain quota\' AFTER locked_until'
+            );
+        }
+
+        return true;
+    });
+
+    $step('reservations.live_guard', static function () use ($statusOnly): bool {
+        if (mysql_has_column('reservations', 'live_guard')) {
+            return false;
+        }
+
+        if (!$statusOnly) {
+            // MySQL has no partial unique index. A unique index ignores rows
+            // whose guard value is NULL, so writing 1 for live rows and NULL
+            // otherwise gives exactly "one live reservation per label" while
+            // keeping every historical row.
+            Database::execute(
+                'ALTER TABLE reservations ADD COLUMN live_guard TINYINT UNSIGNED NULL DEFAULT NULL
+                 COMMENT \'1 while pending/approved, NULL otherwise (partial-unique emulation)\''
+            );
+            Database::execute(
+                "UPDATE reservations SET live_guard = 1 WHERE status IN ('pending', 'approved')"
+            );
+        }
+
+        return true;
+    });
+
+    $step('reservation expiry index', static function () use ($statusOnly): bool {
+        if (mysql_has_index('reservations', 'reservations_expires_at_index')) {
+            return false;
+        }
+
+        if (!$statusOnly) {
+            Database::execute('ALTER TABLE reservations ADD KEY reservations_expires_at_index (expires_at)');
+        }
+
+        return true;
+    });
+
+    $step('one live reservation per label', static function () use ($statusOnly): bool|string {
+        if (mysql_has_index('reservations', 'reservations_live_label_unique')) {
+            return false;
+        }
+
+        $duplicates = live_reservation_duplicates();
+
+        if ($duplicates !== []) {
+            echo '      · ' . count($duplicates) . " label(s) already have more than one live reservation:\n";
+
+            foreach (array_slice($duplicates, 0, 5) as $duplicate) {
+                echo '        domain ' . (int) $duplicate['domain_id'] . ', label '
+                    . (string) $duplicate['label'] . ', ' . (int) $duplicate['n'] . " live row(s)\n";
+            }
+
+            echo "      · resolve them (reject/cancel the extra rows) and re-run. Index not created yet.\n";
+
+            return 'blocked';
+        }
+
+        if (!$statusOnly) {
+            Database::execute(
+                'ALTER TABLE reservations
+                   ADD UNIQUE KEY reservations_live_label_unique (domain_id, label, live_guard)'
+            );
+        }
+
+        return true;
+    });
+
+    $step('provisioning_jobs table', static function () use ($statusOnly): bool {
+        if ((int) Database::scalar(
+            'SELECT COUNT(*) FROM information_schema.tables WHERE table_schema = DATABASE() AND table_name = :t',
+            ['t' => 'provisioning_jobs']
+        ) > 0) {
+            return false;
+        }
+
+        if (!$statusOnly) {
+            Database::execute("CREATE TABLE provisioning_jobs (
+                id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+                subdomain_id BIGINT UNSIGNED NOT NULL,
+                domain_id BIGINT UNSIGNED NOT NULL,
+                fqdn VARCHAR(190) NOT NULL,
+                status ENUM('pending', 'running', 'done', 'failed', 'cancelled') NOT NULL DEFAULT 'pending',
+                attempts SMALLINT UNSIGNED NOT NULL DEFAULT 0,
+                last_error VARCHAR(500) NULL DEFAULT NULL,
+                available_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                requested_by BIGINT UNSIGNED NULL DEFAULT NULL,
+                created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+                PRIMARY KEY (id),
+                KEY provisioning_jobs_status_index (status, available_at),
+                KEY provisioning_jobs_subdomain_index (subdomain_id),
+                KEY provisioning_jobs_fqdn_index (fqdn),
+                CONSTRAINT provisioning_jobs_subdomain_id_foreign FOREIGN KEY (subdomain_id)
+                    REFERENCES subdomains (id) ON DELETE CASCADE ON UPDATE CASCADE,
+                CONSTRAINT provisioning_jobs_domain_id_foreign FOREIGN KEY (domain_id)
+                    REFERENCES domains (id) ON DELETE RESTRICT ON UPDATE CASCADE,
+                CONSTRAINT provisioning_jobs_requested_by_foreign FOREIGN KEY (requested_by)
+                    REFERENCES users (id) ON DELETE SET NULL ON UPDATE CASCADE
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci");
+        }
+
+        return true;
+    });
 }
 
 echo "\n";
@@ -557,7 +815,8 @@ $admins = (int) Database::scalar("SELECT COUNT(*) FROM users WHERE role = 'admin
 echo "Accounts:        {$users}\n";
 echo "Linked to Clerk: {$linked}\n";
 echo "Administrators:  {$admins}\n";
-echo "Applied: {$applied}  Already present: {$skipped}  Failed: {$failed}\n";
+echo "Applied: {$applied}  Already present: {$skipped}  Failed: {$failed}"
+    . ($blocked > 0 ? "  Blocked: {$blocked} (see above)" : '') . "\n";
 
 if ($failed > 0) {
     echo "\nSome steps failed. Fix the reported problem and run the command again.\n";

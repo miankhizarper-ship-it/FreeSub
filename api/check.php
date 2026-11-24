@@ -49,6 +49,11 @@ $response = [
     'status' => $result['status'],
     'message' => $result['message'],
     'suggestions' => $result['suggestions'],
+    // Honest provenance: the UI can say "checked against live DNS" only when
+    // that actually happened (authoritative = consulted the zone).
+    'authoritative' => (bool) ($result['authoritative'] ?? false),
+    'cached' => (bool) ($result['cached'] ?? false),
+    'retryable' => $result['status'] === 'unknown',
     'reserve_url' => null,
 ];
 
@@ -63,4 +68,11 @@ if ($result['available']) {
 }
 
 header('Cache-Control: no-store, max-age=0');
+
+// A provider outage must not look like a 200 "not available" to a client that
+// only checks the status code: 503 is retryable, 200 is an answer.
+if ($result['status'] === 'unknown' && ($result['ok'] ?? true) === false) {
+    json_response($response, 503);
+}
+
 json_response($response);

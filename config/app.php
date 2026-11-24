@@ -55,7 +55,14 @@ return [
     'subdomains' => [
         'min_length' => env_int('SUBDOMAIN_MIN_LENGTH', 3),
         'max_length' => env_int('SUBDOMAIN_MAX_LENGTH', 32),
+        // Platform default. A per-domain quota (domains.subdomain_quota) and a
+        // per-user override (users.subdomain_quota) take precedence.
         'default_quota' => env_int('SUBDOMAIN_DEFAULT_QUOTA', 5),
+        // Initial allowance for a brand-new account. Enforced server-side against
+        // active subdomains + pending reservations, never against a form value.
+        'initial_quota' => env_int('SUBDOMAIN_INITIAL_QUOTA', 2),
+        // How long a pending reservation holds a label before it lapses.
+        'reservation_ttl_hours' => env_int('RESERVATION_TTL_HOURS', 168),
         // Labels that must never be handed out, regardless of the root domain.
         'reserved_labels' => [
             'www', 'mail', 'smtp', 'imap', 'pop', 'pop3', 'webmail', 'ftp', 'sftp', 'ssh',
@@ -65,6 +72,65 @@ return [
             'panel', 'cpanel', 'dashboard', 'status', 'dev', 'staging', 'test', 'demo', 'beta',
             'freesub', 'kharcha', 'secure', 'login', 'register', 'signup', 'account', 'my',
             'cloudflare', 'cpanel', 'whm', 'localhost', 'ip', 'server', 'host', 'hosting',
+            'www1', 'www2', 'gateway', 'proxy', 'relay', 'vpn', 'internal', 'intranet',
+            'autodiscover', 'autoconfig', 'postmaster', 'webmaster', 'noc', 'security',
+        ],
+        // Labels matching these patterns are refused even when absent from the
+        // list above. Anchored, so "myns" is fine but "ns3"/"ns7" are not.
+        'reserved_patterns' => [
+            '^ns\\d*$',
+            '^mx\\d*$',
+            '^smtp\\d*$',
+            '^mail\\d*$',
+            '^www\\d*$',
+            '^api-?v\\d+$',
+        ],
+    ],
+
+    /* ------------------------------------------------------------------
+     * Availability engine
+     *
+     * The public search must be able to say "taken" without asking Cloudflare
+     * on every keystroke, but it must never say "available" when it cannot
+     * prove it. Hence two separate answers:
+     *   unambiguous = a local rule already decided it (taken / reserved)
+     *   fail_closed = no authoritative answer could be obtained right now
+     * ------------------------------------------------------------------ */
+    'availability' => [
+        // Seconds an authoritative DNS answer is cached in storage/cache/dns.
+        'cache_ttl' => env_int('AVAILABILITY_CACHE_TTL', 300),
+        // Seconds a NEGATIVE answer ("no records at this name") is cached. Kept
+        // short on purpose: a stale "free" answer is the expensive mistake.
+        'negative_cache_ttl' => env_int('AVAILABILITY_NEGATIVE_CACHE_TTL', 30),
+        // Authoritative lookups per IP per window for the public endpoint.
+        'lookup_max_per_window' => env_int('RATE_LIMIT_LOOKUP_ATTEMPTS', 30),
+        'lookup_window' => env_int('RATE_LIMIT_LOOKUP_WINDOW', 60),
+        // When the provider is configured but unreachable, say "unknown" and
+        // refuse to reserve rather than pretending the name is free.
+        'fail_closed' => env_bool('AVAILABILITY_FAIL_CLOSED', true),
+    ],
+
+    /* ------------------------------------------------------------------
+     * DNS provisioning queue (Task 04)
+     *
+     * Provisioning is admin/CLI triggered. There is no web path that writes
+     * DNS, and approved reservations only become active after a verified
+     * create.
+     * ------------------------------------------------------------------ */
+    'provisioning' => [
+        'max_attempts' => env_int('PROVISIONING_MAX_ATTEMPTS', 5),
+        // Seconds before a claimed job may be picked up again after a crash.
+        'lock_timeout' => env_int('PROVISIONING_LOCK_TIMEOUT', 300),
+        // Wait between a create and the read-back that proves it exists.
+        'verify_delay_ms' => env_int('PROVISIONING_VERIFY_DELAY_MS', 0),
+        // Refuse to provision unless the DNS engine is enabled AND verified.
+        'require_verified_zone' => env_bool('PROVISIONING_REQUIRE_VERIFIED_ZONE', true),
+        // Where a provisioned subdomain points. Deliberately a server-side
+        // setting: a user may choose a name, never a destination.
+        'targets' => [
+            'a' => trim((string) env('DNS_PROVISIONING_A', '')),
+            'aaaa' => trim((string) env('DNS_PROVISIONING_AAAA', '')),
+            'cname' => trim((string) env('DNS_PROVISIONING_CNAME', '')),
         ],
     ],
 

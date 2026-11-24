@@ -24,6 +24,7 @@ CREATE TABLE IF NOT EXISTS users (
     last_login_ip VARCHAR(45) NULL,
     failed_login_attempts INTEGER NOT NULL DEFAULT 0,
     locked_until TEXT NULL,
+    subdomain_quota INTEGER NULL,
     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
     updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
@@ -96,12 +97,26 @@ CREATE TABLE IF NOT EXISTS reservations (
     reviewed_at TEXT NULL,
     expires_at TEXT NULL,
     request_ip VARCHAR(45) NULL,
+    -- MySQL cannot express a partial unique index, so it constrains
+    -- (domain_id, label, live_guard) where live_guard is 1 only while live.
+    -- SQLite does have partial indexes, but the column exists on both engines so
+    -- the application writes exactly one INSERT and one UPDATE shape.
+    live_guard INTEGER NULL,
     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
     updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 CREATE INDEX IF NOT EXISTS reservations_user_status_index ON reservations (user_id, status);
 CREATE INDEX IF NOT EXISTS reservations_domain_label_index ON reservations (domain_id, label, status);
 CREATE INDEX IF NOT EXISTS reservations_status_created_index ON reservations (status, created_at);
+CREATE INDEX IF NOT EXISTS reservations_expires_at_index ON reservations (expires_at);
+
+-- Race-safe reservation: at most ONE live (pending/approved) reservation per
+-- label per root domain, enforced by the database rather than by a SELECT.
+-- Cancelled/rejected/expired rows fall out of the index, so history is kept and
+-- the label can be reserved again later. (Task 04)
+CREATE UNIQUE INDEX IF NOT EXISTS reservations_live_label_unique
+    ON reservations (domain_id, label)
+    WHERE status IN ('pending', 'approved');
 
 CREATE TABLE IF NOT EXISTS subdomains (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -145,6 +160,26 @@ CREATE UNIQUE INDEX IF NOT EXISTS dns_records_subdomain_type_name_unique ON dns_
 CREATE INDEX IF NOT EXISTS dns_records_status_index ON dns_records (status);
 CREATE INDEX IF NOT EXISTS dns_records_domain_index ON dns_records (domain_id);
 CREATE INDEX IF NOT EXISTS dns_records_provider_record_index ON dns_records (provider_record_id);
+
+-- DNS provisioning queue (Task 04). An approved reservation creates a row here;
+-- a worker (admin page or CLI) turns it into a verified record. A subdomain only
+-- becomes `active` after the read-back in ProvisioningQueue::provision().
+CREATE TABLE IF NOT EXISTS provisioning_jobs (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    subdomain_id INTEGER NOT NULL REFERENCES subdomains (id) ON DELETE CASCADE,
+    domain_id INTEGER NOT NULL REFERENCES domains (id) ON DELETE RESTRICT,
+    fqdn VARCHAR(190) NOT NULL,
+    status TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending', 'running', 'done', 'failed', 'cancelled')),
+    attempts INTEGER NOT NULL DEFAULT 0,
+    last_error VARCHAR(500) NULL,
+    available_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    requested_by INTEGER NULL REFERENCES users (id) ON DELETE SET NULL,
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+CREATE INDEX IF NOT EXISTS provisioning_jobs_status_index ON provisioning_jobs (status, available_at);
+CREATE INDEX IF NOT EXISTS provisioning_jobs_subdomain_index ON provisioning_jobs (subdomain_id);
+CREATE INDEX IF NOT EXISTS provisioning_jobs_fqdn_index ON provisioning_jobs (fqdn);
 
 CREATE TABLE IF NOT EXISTS audit_logs (
     id INTEGER PRIMARY KEY AUTOINCREMENT,

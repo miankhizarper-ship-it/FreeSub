@@ -1,6 +1,8 @@
 <?php
 /**
  * @var list<array<string, mixed>> $users
+ * @var array<int, array{active:int, reserved:int}> $usage
+ * @var int $defaultQuota
  * @var string $search
  * @var array<string, mixed> $authUser
  */
@@ -47,6 +49,7 @@
                                 <th scope="col">User</th>
                                 <th scope="col">Role</th>
                                 <th scope="col">Status</th>
+                                <th scope="col">Subdomains</th>
                                 <th scope="col">Joined</th>
                                 <th scope="col">Last login</th>
                                 <th scope="col" class="text-end">Actions</th>
@@ -64,6 +67,29 @@
                                     <span class="badge-status <?= ($user['status'] ?? '') === 'active' ? 'is-active' : 'is-failed' ?>">
                                         <?= e(ucfirst((string) $user['status'])) ?>
                                     </span>
+                                </td>
+                                <td>
+                                    <?php
+                                    $rowUsage = $usage[(int) $user['id']] ?? ['active' => 0, 'reserved' => 0];
+                                    $override = $user['subdomain_quota'] ?? null;
+                                    $effective = $override !== null ? (int) $override : $defaultQuota;
+                                    $held = $rowUsage['active'] + $rowUsage['reserved'];
+                                    ?>
+                                    <form method="post" action="<?= e(app_url('/admin/users.php')) ?>" class="d-flex align-items-center gap-1">
+                                        <?= csrf_field() ?>
+                                        <input type="hidden" name="id" value="<?= e((string) $user['id']) ?>">
+                                        <input type="hidden" name="action" value="quota">
+                                        <input type="number" class="form-control form-control-sm" name="quota"
+                                               value="<?= e($override === null ? '' : (string) $override) ?>"
+                                               placeholder="<?= (int) $defaultQuota ?>"
+                                               min="0" max="500" style="max-width:74px"
+                                               aria-label="Subdomain quota for <?= e((string) $user['email']) ?>">
+                                        <button class="btn btn-sm btn-outline-secondary" type="submit">Set</button>
+                                    </form>
+                                    <div class="text-muted-2" style="font-size:.78rem">
+                                        <?= (int) $held ?> used of <?= (int) $effective ?>
+                                        <?= $override === null ? '(default)' : '(override)' ?>
+                                    </div>
                                 </td>
                                 <td class="text-muted-2"><?= e(format_date((string) $user['created_at'])) ?></td>
                                 <td class="text-muted-2"><?= e(format_date((string) ($user['last_login_at'] ?? null), 'M j, Y H:i')) ?></td>

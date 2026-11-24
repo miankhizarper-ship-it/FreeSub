@@ -33,6 +33,20 @@ final class SubdomainService
     }
 
     /**
+     * Strict variant used by the Task 04 engine.
+     *
+     * normaliseLabel() above is a *display* helper: it rewrites hostile input into
+     * something plausible. That is fine for prefilling a form, and wrong for
+     * reserving a name — so the reservation path uses SubdomainLabel, which
+     * refuses instead of rewriting. Both are kept because existing pages prefill
+     * from the lenient one.
+     */
+    public static function strictLabel(string $input, string $rootDomain = ''): array
+    {
+        return SubdomainLabel::validate($input, $rootDomain);
+    }
+
+    /**
      * Full availability check used by the landing page search and the API.
      *
      * @param array<string, mixed>|null $domain
@@ -43,83 +57,33 @@ final class SubdomainService
      */
     public static function check(string $rawLabel, ?array $domain = null): array
     {
-        $label = self::normaliseLabel($rawLabel);
-        $result = [
-            'ok' => true,
-            'label' => $label,
-            'fqdn' => null,
-            'domain' => $domain['root_domain'] ?? null,
-            'available' => false,
-            'status' => 'invalid',
-            'message' => '',
-            'suggestions' => [],
+        // Task 04: one engine answers "is this free?", so the landing page, the
+        // API and the reservation path can never disagree about a name.
+        $engine = new AvailabilityEngine();
+        $result = $engine->check($rawLabel, $domain);
+
+        return [
+            'ok' => $result['ok'] !== false,
+            'label' => $result['label'],
+            'fqdn' => $result['fqdn'],
+            'domain' => $result['root_domain'],
+            'available' => $result['available'],
+            'status' => $result['status'],
+            'message' => $result['message'],
+            'suggestions' => $result['suggestions'],
+            // Additive: the authoritative/cached flags let the UI be honest about
+            // whether DNS was actually consulted.
+            'authoritative' => $result['authoritative'],
+            'cached' => $result['cached'],
+            'source' => $result['source'],
         ];
-
-        $error = Validator::subdomainLabel($label);
-
-        if ($error !== null) {
-            $result['message'] = $error;
-            $result['suggestions'] = self::suggestions($label);
-
-            return $result;
-        }
-
-        if ($domain === null) {
-            $domain = Domain::available()[0] ?? null;
-        }
-
-        if ($domain === null) {
-            $result['ok'] = false;
-            $result['status'] = 'unavailable';
-            $result['message'] = 'No root domains are currently open for registration.';
-
-            return $result;
-        }
-
-        $fqdn = $label . '.' . $domain['root_domain'];
-        $result['fqdn'] = $fqdn;
-        $result['domain'] = (string) $domain['root_domain'];
-
-        if (($domain['registration_status'] ?? 'ready') !== 'ready' || !($domain['is_active'] ?? true)) {
-            $result['status'] = 'unavailable';
-            $result['message'] = $domain['root_domain'] . ' is currently not accepting new subdomains.';
-
-            return $result;
-        }
-
-        if (Subdomain::labelTaken((int) $domain['id'], $label)) {
-            $result['status'] = 'taken';
-            $result['message'] = $fqdn . ' is already taken.';
-            $result['suggestions'] = self::suggestions($label);
-
-            return $result;
-        }
-
-        if (Reservation::pendingFor((int) $domain['id'], $label) !== null) {
-            $result['status'] = 'reserved';
-            $result['message'] = $fqdn . ' is reserved while a request is being reviewed.';
-            $result['suggestions'] = self::suggestions($label);
-
-            return $result;
-        }
-
-        // Provider lookup is advisory only; the null driver never confirms.
-        $providerCheck = DnsProvider::current()->isHostnameAvailable($fqdn);
-
-        if (($providerCheck['available'] ?? true) === false) {
-            $result['status'] = 'taken';
-            $result['message'] = $providerCheck['reason'] ?? ($fqdn . ' is not available.');
-
-            return $result;
-        }
-
-        $result['available'] = true;
-        $result['status'] = 'available';
-        $result['message'] = $fqdn . ' is available.';
-
-        return $result;
     }
 
+    /**
+     * Former implementation, kept for reference only; no caller uses it.
+     *
+     * @return array<string, mixed>
+     */
     /**
      * Cheap alternatives shown when a label is taken.
      *
@@ -173,60 +137,21 @@ final class SubdomainService
      */
     public static function reserve(array $user, string $rawLabel, int $domainId, ?string $purpose = null): array
     {
+        // Task 04: the reservation service owns validation, quota, the live-label
+        // unique constraint and auditing. This wrapper keeps the old signature
+        // working for existing callers.
         $domain = Domain::find($domainId);
 
-        if ($domain === null || !($domain['is_active'] ?? false)) {
+        if ($domain === null) {
             return ['ok' => false, 'message' => 'That extension is not available.'];
         }
 
-        if (($domain['registration_status'] ?? 'ready') !== 'ready') {
-            return ['ok' => false, 'message' => 'That extension is not accepting new subdomains right now.'];
-        }
-
-        $check = self::check($rawLabel, $domain);
-
-        if (!$check['available']) {
-            return ['ok' => false, 'message' => $check['message']];
-        }
-
-        $label = $check['label'];
-        $fqdn = (string) $check['fqdn'];
-        $userId = (int) $user['id'];
-
-        $quota = (int) ($domain['subdomain_quota'] ?? config('subdomains.default_quota', 5));
-        $owned = Subdomain::countForUser($userId);
-
-        if ($owned >= $quota) {
-            return [
-                'ok' => false,
-                'message' => sprintf('You have reached your limit of %d subdomains. Delete one first or contact support.', $quota),
-            ];
-        }
-
-        return Database::transaction(static function () use ($userId, $domainId, $label, $fqdn, $purpose, $check): array {
-            // Re-check inside the transaction to reduce the race window.
-            if (Subdomain::labelTaken($domainId, $label) || Reservation::pendingFor($domainId, $label) !== null) {
-                return ['ok' => false, 'message' => $fqdn . ' was just taken. Please try another name.'];
-            }
-
-            $reservationId = Reservation::create($userId, $domainId, $label, $purpose);
-
-            audit_log(
-                'subdomain.reserved',
-                $userId,
-                ['fqdn' => $fqdn, 'label' => $label, 'domain_id' => $domainId],
-                'reservation',
-                $reservationId,
-                'Reserved ' . $fqdn
-            );
-
-            return [
-                'ok' => true,
-                'message' => 'Reservation received for ' . $fqdn . '. DNS provisioning is not automated yet, so our team will follow up by email.',
-                'reservation_id' => $reservationId,
-                'fqdn' => $fqdn,
-                'label' => $check['label'],
-            ];
-        });
+        return ReservationService::create($user, $rawLabel, $domain, $purpose);
     }
+
+    /**
+     * Former implementation, kept for reference only; no caller uses it.
+     *
+     * @return array<string, mixed>
+     */
 }

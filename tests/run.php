@@ -414,7 +414,9 @@ if (run_suite($only, 'subdomains')) {
     $t->check('reservation stored as pending', ($row['status'] ?? '') === 'pending');
 
     $after = SubdomainService::check('mytestsite');
-    $t->check('reserved label no longer available', $after['available'] === false && $after['status'] === 'reserved', $after);
+    // The engine distinguishes "a live reservation holds it" (pending) from
+    // "a platform rule forbids it" (reserved); both are unavailable.
+    $t->check('reserved label no longer available', $after['available'] === false && $after['status'] === 'pending', $after);
 
     $again = SubdomainService::reserve($user, 'mytestsite', (int) $domain['id']);
     $t->check('duplicate reservation refused', $again['ok'] === false);
@@ -485,7 +487,17 @@ if (run_suite($only, 'subdomains')) {
 }
 
 /* -------------------------------------------------------------------------
- * 5. Audit logging and abuse
+ * 5. Reservation engine (Task 04)
+ * ---------------------------------------------------------------------- */
+if (run_suite($only, 'reservations')) {
+    // The reservation suite drives provisioning through the DNS engine, so it
+    // reuses that suite's test double and helpers (dns_test_environment()).
+    require_once __DIR__ . '/dns-suite.php';
+    require __DIR__ . '/reservation-suite.php';
+}
+
+/* -------------------------------------------------------------------------
+ * 6. Audit logging and abuse
  * ---------------------------------------------------------------------- */
 if (run_suite($only, 'audit')) {
     $t->suite('Audit & abuse');
@@ -526,7 +538,7 @@ if (run_suite($only, 'audit')) {
 }
 
 /* -------------------------------------------------------------------------
- * 6. Output helpers / views
+ * 7. Output helpers / views
  * ---------------------------------------------------------------------- */
 if (run_suite($only, 'views')) {
     $t->suite('Views & helpers');
@@ -629,7 +641,7 @@ if (run_suite($only, 'views')) {
 }
 
 /* -------------------------------------------------------------------------
- * 7. HTTP journeys (needs a running server)
+ * 8. HTTP journeys (needs a running server)
  * ---------------------------------------------------------------------- */
 if (run_suite($only, 'http')) {
     $t->suite('HTTP journeys');
