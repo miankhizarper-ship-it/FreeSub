@@ -106,13 +106,47 @@ return [
     ],
 
     'dns' => [
-        // Integration is intentionally not implemented yet; the interface exists
-        // so the Cloudflare driver can be dropped in without touching callers.
-        'provider' => (string) env('DNS_PROVIDER', 'none'),
+        // 'none' keeps every DNS operation disabled (NullDnsProvider). 'cloudflare'
+        // enables the driver only when a token *and* a zone id are present and the
+        // zone is verified to belong to `root_domain`.
+        'provider' => strtolower(trim((string) env('DNS_PROVIDER', 'none'))),
+
+        // The single apex zone this installation may ever write to. A Cloudflare
+        // zone whose name does not match is refused before any record is touched,
+        // which is what stops "arbitrary zone selection" at the source.
+        'root_domain' => strtolower(trim((string) env('DNS_ROOT_DOMAIN', 'kharcha.info'))),
+
+        // Record types a user-facing flow may ever create. NS/MX/TXT/CAA are
+        // deliberately absent: they are never written through this engine.
+        'allowed_record_types' => ['A', 'AAAA', 'CNAME'],
+
+        // Proxying (orange cloud) is a platform decision, never a user choice.
+        'allow_proxied' => false,
+        'default_ttl' => env_int('CLOUDFLARE_DEFAULT_TTL', 1),
+
         'cloudflare' => [
-            'api_token' => (string) env('CLOUDFLARE_API_TOKEN', ''),
-            'account_id' => (string) env('CLOUDFLARE_ACCOUNT_ID', ''),
-            'base_url' => (string) env('CLOUDFLARE_API_BASE', 'https://api.cloudflare.com/client/v4'),
+            // Server-side only. Never rendered, never logged, never stored in the
+            // database and never sent to the browser.
+            'api_token' => trim((string) env('CLOUDFLARE_API_TOKEN', '')),
+            // The zone id is a public identifier (it appears in the dashboard URL),
+            // so it is safe in the database via domains.zone_reference.
+            'zone_id' => trim((string) env('CLOUDFLARE_ZONE_ID', '')),
+            'account_id' => trim((string) env('CLOUDFLARE_ACCOUNT_ID', '')),
+            // Canonical name is CLOUDFLARE_API_BASE_URL; the historical
+            // CLOUDFLARE_API_BASE is still honoured so existing .env files work.
+            'base_url' => rtrim((string) env(
+                'CLOUDFLARE_API_BASE_URL',
+                (string) env('CLOUDFLARE_API_BASE', 'https://api.cloudflare.com/client/v4')
+            ), '/'),
+            // Multiple of 100. Caps how many pages a single listing walks, so a
+            // broken `result_info` can never turn into an unbounded loop.
+            'per_page' => 100,
+            'max_pages' => env_int('CLOUDFLARE_MAX_PAGES', 10),
+            'connect_timeout' => env_int('CLOUDFLARE_CONNECT_TIMEOUT', 5),
+            'request_timeout' => env_int('CLOUDFLARE_TIMEOUT', 15),
+            // Retries apply to idempotent reads only (see CloudflareApiClient).
+            'max_retries' => env_int('CLOUDFLARE_MAX_RETRIES', 2),
+            'retry_backoff_ms' => env_int('CLOUDFLARE_RETRY_BACKOFF_MS', 250),
         ],
     ],
 

@@ -1,10 +1,16 @@
-# Security audit — Clerk authentication migration (Task 02)
+# Security audit — Task 02 (Clerk authentication) and Task 03 (DNS engine)
 
 **Scope:** the replacement of FreeSub's native password authentication with Clerk,
 covering `login.php`, `register.php`, `logout.php`, `clerk-bridge.php`,
 `auth/handoff.php`, `clerk/webhook.php`, `includes/auth.php`,
 `includes/models/User.php`, `includes/services/Clerk/*`, the schema changes and
 the CLI tooling in `database/`.
+
+Task 03 scope: `includes/services/DnsProvider.php`,
+`includes/services/Dns/*`, `database/dns-sync.php`, `admin/dns.php`,
+`includes/views/admin/dns.php`, the `dns_records` migration in
+`database/migrate.php` + both schema files, `tests/dns-suite.php` and
+`tests/support/CloudflareTestDouble.php`.
 
 **Date:** 2026-11-23 · **Revision:** working branch `arena/9d25821a-freesub`
 
@@ -35,10 +41,25 @@ run on a networked machine.
 | Break-glass path | **Pass** after two fixes; CLI-only, password-gated, flag-gated, audited |
 | Dependency posture | **Pass with a caveat** — SDK declared but not vendored (§6) |
 
-Fourteen issues were found across implementation and this final review, all fixed; they are listed in
-§4, because a report that only lists what currently looks fine is useless to the
-next reviewer. Five risks remain open and are listed in §5 — the most important
-being that none of this has been run against the live Clerk instance.
+**Task 03 (DNS engine) — additional rows:**
+
+| Area | Result |
+|------|--------|
+| Credentials | **Pass** — token read from the environment at call time, never stored on a dumpable object, scrubbed from free text in logs, never in HTML/JS/DB/exceptions |
+| Zone binding | **Pass** — the zone is verified against `DNS_ROOT_DOMAIN` and must be `active` before any operation; no caller can choose a zone |
+| SSRF | **Pass** — fixed base URL, validated path segments, no caller-supplied URL, `http` refused except loopback |
+| Record safety | **Pass** — A/AAAA/CNAME only, public addresses only, no wildcard, no proxying, no reserved labels |
+| Write safety | **Pass** — a create is never blindly retried; ambiguous outcomes are reconciled, and deletions address exactly one owned id |
+| Non-destruction | **Pass** — sync reports and never deletes or recreates; unknown records are listed and left alone |
+| Admin surface | **Pass** — admin-only, CSRF-checked, read-only, no token and no mutation control |
+| Migration | **Pass** — additive, backfilled, guarded on both engines; no row deleted |
+| Live verification | **Open** — nothing has been run against the real Cloudflare API (§4b D-R1) |
+
+Nineteen issues were found across both deliveries (fourteen in Task 02, five in
+Task 03), all fixed; they are listed in §4 and §4b, because a report that only
+lists what currently looks fine is useless to the next reviewer. Risks that remain
+open are listed in §5 and §4b — the most important being that neither integration
+has been run against the live service it talks to.
 
 ---
 
@@ -356,6 +377,88 @@ reported as key-unavailable"; exercised end to end through the bridge.
 
 ---
 
+## 4b. DNS engine findings (Task 03)
+
+These are the defects found while building and reviewing the Cloudflare engine,
+plus the controls it adds. "Fixed" means the code and a regression test carry it.
+
+### D1 — Silent credential downgrade would have attempted half-configured writes (High, fixed)
+
+`DnsProvider::make('cloudflare')` originally produced a driver unconditionally.
+A token without a zone id (or the reverse) would have reached the HTTP layer with
+an empty value and failed at an unpredictable point. The factory now returns
+`NullDnsProvider` unless **both** the token and the zone id are present, and the
+degradation is logged with `present`/`missing` markers, never values.
+Covered by `dns-security` ("factory falls back to the null driver without
+credentials", "refuses a token without a zone id").
+
+### D2 — `array + array` kept the defaults, so every pre-flight failure reported an empty reason (High, fixed)
+
+`verifyZone()` merged its failure codes with `$base + ['code' => …]`. Union keeps
+the left-hand keys, so `code` stayed `'error'` and `message` stayed `''`: the
+admin page and the CLI would have shown a blank reason for every failure —
+misconfiguration, auth failure, zone mismatch — while the driver silently
+reported "wrong zone". Found by the first run of `dns-client`, fixed with
+`array_merge`, and every branch now asserts its code.
+
+### D3 — `listRecords()` read `result` before validating `success` (Medium, fixed)
+
+The listing path bypassed the response validator and indexed `$response['result']`
+directly, which is an undefined-key warning on an error envelope and would have
+turned a clean auth failure into a half-rendered page. It now goes through the
+same `decode()` that validates `success` and `errors`.
+
+### D4 — A transport failure delivered as HTTP status 0 was not retried (Medium, fixed)
+
+The double revealed that a dead socket can surface as `status: 0` rather than as
+an exception. Reads now treat that as a transport failure (retry with backoff);
+writes treat it as **ambiguous** and never retry. Two assertions: "a transport
+failure on a read is retried" and "a 5xx on create is not retried".
+
+### D5 — Reconciliation test was proving the wrong thing (test-only, fixed)
+
+The first version of the "create timed out" test seeded the record *before* the
+call, so it proved the duplicate check rather than reconciliation. The double now
+supports `applyThenTimeoutOn('POST')`: the write lands, the response is lost. The
+engine re-reads the zone, adopts the existing Cloudflare id, and does not create a
+second record — which is exactly the failure mode the brief forbids blind-retrying.
+
+### D6 — Empty name bypassed the subdomain-ownership check (Medium, fixed)
+
+`createForSubdomain()` validated the (empty) caller-supplied name before filling
+in the subdomain's own FQDN, so the first attempt at a record failed with "enter
+the hostname". The name is now resolved before validation, and a name that is not
+the subdomain's own FQDN is refused outright.
+
+### Controls added by this task (all regression-tested)
+
+| Control | Where | Test |
+|---------|-------|------|
+| Credentials from the environment only; never in the DB, HTML, JS, logs or exceptions | `CloudflareApiClient` constructor; `DnsLog::scrub` | `dns-client` token assertions, `dns-security`, HTTP run |
+| Zone must match `DNS_ROOT_DOMAIN` and be `active` before any operation | `CloudflareApiClient::verifyZone` | `dns-client` (4 cases) |
+| No caller-supplied URL: fixed base URL + validated path segments + identifier regex | `request()` / `requireIdentifier()` | "path guard refuses an absolute URL", "invalid zone id refused" |
+| Plaintext base URL refused except loopback | `isAllowedUrl()` | `dns-security` |
+| Only A/AAAA/CNAME may be written, whatever the caller asks | `requireWritableType()`, `DnsRecordValidator::validate` | 6 type refusals + client-level refusal |
+| Public-address-only targets | `DnsRecordValidator::isBlockedIp` (v4 and v6, incl. IPv4-mapped) | 13 blocked IPv4 + 9 blocked IPv6 |
+| Remote record addressed only by the id stored on our own row | `DnsManager::deleteRecord` / `updateRecord` | delete ownership, cross-domain delete |
+| Never retry a create; reconcile first | `CloudflareApiClient::request`, `DnsManager::reconcileAfterFailure` | "a 5xx on create is not retried", "reconciled after a timeout" |
+| Sync never deletes or recreates | `DnsManager::sync` | "never deletes an unmanaged record", "does not recreate a missing record" |
+| Admin-only page, CSRF on every POST, no mutation control, no token in source | `admin/dns.php` | `dns-security` source checks + HTTP run |
+| Every mutation audited (`dns.record_created`, `_deleted`, `_updated`, `dns.sync`, connection test) | `audit_log` calls | audit assertions in `dns-lifecycle` |
+| Migration is additive and backfills | `database/migrate.php`, both schemas | migration run on a legacy DB, 9/9 MySQL checks |
+
+### Risks that remain open (Task 03)
+
+| # | Risk | Severity | Status |
+|---|------|----------|--------|
+| D-R1 | The engine is unproven against the live Cloudflare API. | High impact, low likelihood (the request/response shapes follow the documented v4 API) | Open by environment: no credentials, `api.cloudflare.com` unreachable |
+| D-R2 | An operator with CLI access and a token can create records for any in-zone name, because the CLI is trusted. | Medium | Accepted: the CLI is the operator's tool, and it runs with the same rules; every action is audited |
+| D-R3 | `DnsRecordValidator` blocks 6to4 and NAT64 prefixes wholesale, which could reject a legitimate IPv6 target. | Low | Accepted: refusing a rare address is safer than allowing an SSRF-adjacent target |
+| D-R4 | Retry sleeps (up to ~4 s, or 5 s on `Retry-After`) can delay an admin request. | Low | Accepted: retries apply to reads only and are capped |
+| D-R5 | SQLite cannot add a `REFERENCES` clause via `ALTER TABLE`, so a migrated SQLite database enforces `domain_id` in the application, not the engine. | Low (development only) | Documented in `migrate.php`; fresh installs and MySQL have the FK |
+
+---
+
 ## 5. Open risks
 
 ### R1 — The integration is unverified against the live instance (High impact, open)
@@ -419,8 +522,12 @@ web route that accepts a password.
 | `clerk-webhook` | 14 | HMAC, tampering, wrong secret, replay window, rotation list, parse ordering |
 | `clerk-webhook-effects` | 17 | `user.updated`/`user.deleted`/session events, no provisioning, idempotency |
 | `env`, `security`, `auth`, `schema`, `subdomains`, `audit`, `views` | 126 | inherited controls (8+40+22+13+25+8+10), still green after the auth rewrite |
-| **Total** | **287** | all green, no network, isolated SQLite |
-| `tests/http-clerk.sh` | **61 checks** | real HTTP: both pages render, no password field, every config key the JS reads, guest redirects, bridge hardening, full handoff, replay, admin denial, webhook signature/replay/idempotency, administrator migration, logout |
+| `dns-validate` | 66 | record rules: in-zone names, foreign/apex/suffix-trick/wildcard/underscore/reserved/numeric labels, 13 blocked IPv4 ranges, 9 blocked IPv6 ranges (incl. IPv4-mapped), CNAME URL/IP/port/apex/`.local` targets, 6 refused record types, unsupported TTL |
+| `dns-client` | 30 | zone verified / mismatched / not-active / unknown, 401 + 403 → auth, 429 → rate_limited, non-JSON body, `success=false` on HTTP 200, read retry after 5xx and after a transport failure, token never logged, 40-char scrub, path/identifier guards, forbidden type refused by the client |
+| `dns-lifecycle` | 53 | create → id persisted → audit, duplicate, cross-subdomain name, name outside the subdomain, private IPv4, **create 5xx not retried**, **write-landed-then-timeout reconciled without a duplicate**, update (+ private address, wrong domain), delete (ownership, single record, unmanaged record survives, soft delete, audited, idempotent, cross-domain refused), sync (unmanaged preserved, externally deleted reported, never recreated), provider availability incl. fail-open |
+| `dns-security` | 12 | factory degrades to null without credentials, token-without-zone refused, admin guard, CSRF ordering, no token in page source or template, no mutation control, plaintext base URL refused, interface unchanged |
+| **Total** | **448** | all green, no network, isolated SQLite |
+| `tests/http-clerk.sh` | **71 checks** | real HTTP: both pages render, no password field, every config key the JS reads, guest redirects, bridge hardening, full handoff, replay, admin denial, webhook signature/replay/idempotency, administrator migration, DNS diagnostics page (admin-only, no token, CSRF, no mutation, unconfigured-safe), logout |
 
 Not covered by automated tests, and why: rendering of the Clerk components
 (themselves) needs a browser and network access to the frontend API; Google
@@ -537,13 +644,14 @@ unproven, however green the local suites are.
 
 ## 9. Verdict
 
-**`READY FOR LIVE CLERK TEST`** — not production-ready.
+**`READY FOR LIVE CLERK TEST`** (Task 02) and **`DNS ENGINE READY FOR LIVE
+CLOUDFLARE TEST`** (Task 03) — neither is production-ready.
 
 What that means concretely:
 
 * Every control this task asked for is implemented, and each one has a
-  regression test that would fail if it were removed. 287 unit/integration
-  assertions and 61 end-to-end HTTP checks pass, the latter also with
+  regression test that would fail if it were removed. 448 unit/integration
+  assertions and 71 end-to-end HTTP checks pass, the latter also with
   `APP_DEBUG=false`.
 * Fourteen defects were found across implementation and this review, including
   one **Critical** (an administrator row could be inherited by a web sign-in,
@@ -553,6 +661,24 @@ What that means concretely:
   production-ready: the integration is unproven at the one boundary the local
   suites cannot reach — a real instance minting a real `freesub_handoff` token and
   a real secret key being accepted by the Backend API.
+
+**Task 03 (DNS engine) status, reported separately:**
+
+| Claim | Status |
+|-------|--------|
+| `MOCK TESTS PASSED` | **yes** — 161 DNS assertions, mocked transport, no credentials |
+| `LIVE CONNECTION VERIFIED` | **no** — no Cloudflare credentials here, `api.cloudflare.com` unreachable |
+| `DNS MUTATIONS VERIFIED` | **no** — not attempted; no web path writes DNS in this build |
+
+The engine is safe to ship in this state precisely because it cannot write from
+the web: `DNS_PROVIDER=none` (or a missing token/zone) leaves every operation
+disabled, and the admin page can only read.
+
+For Task 03, the equivalent next step is an operator run of
+`FREESUB_DNS_LIVE=1 … php tests/run.php dns-live` followed by
+`php database/dns-sync.php` against the real `kharcha.info` zone — both read-only.
+Only after that should anyone consider a deliberate create/read-back/delete on a
+throwaway name, and only then may `DNS MUTATIONS VERIFIED` be claimed.
 
 To move to `READY FOR PRODUCTION`, complete §8.3 items 1–7 on a networked
 machine. Nothing in the code should need to change; if something does, it is

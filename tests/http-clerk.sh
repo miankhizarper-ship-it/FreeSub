@@ -36,6 +36,17 @@ export CLERK_BREAK_GLASS="false"
 export CLERK_JWKS_CACHE_TTL="0"
 export FREESUB_E2E_ORIGIN="http://localhost:${PORT}"
 
+# The end-to-end run writes into storage/dev.sqlite, and the administrator
+# migration step needs a row it can promote. Make the run self-contained so it
+# is reproducible (and so a clean checkout passes on the first try).
+if [ "${FREESUB_E2E_RESET:-1}" = "1" ]; then
+    rm -f "${ROOT}/storage/dev.sqlite" "${ROOT}/storage/dev.sqlite-wal" "${ROOT}/storage/dev.sqlite-shm"
+    "${PHP_BIN}" "${ROOT}/database/install.php" >/dev/null
+    "${PHP_BIN}" "${ROOT}/database/migrate.php" >/dev/null
+    "${PHP_BIN}" "${ROOT}/database/create-admin.php" "Site Admin" legacy-admin@clerk-test.local \
+        --password='Adm1nStr0ngPass' >/dev/null
+fi
+
 echo "Starting the app on port ${PORT} with the Clerk test double…"
 "${PHP_BIN}" -S "127.0.0.1:${PORT}" -t "${ROOT}" "${ROOT}/tests/router-e2e.php" >/tmp/freesub-e2e-${PORT}.log 2>&1 &
 SERVER_PID=$!

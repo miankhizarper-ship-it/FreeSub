@@ -383,6 +383,16 @@ foreach (['clerk-config', 'clerk-token', 'clerk-sync', 'clerk-handoff', 'clerk-s
 }
 
 /* -------------------------------------------------------------------------
+ * 3c. DNS engine (Cloudflare)
+ * ---------------------------------------------------------------------- */
+foreach (['dns-validate', 'dns-client', 'dns-lifecycle', 'dns-security', 'dns-live'] as $dnsSuite) {
+    if (run_suite($only, $dnsSuite)) {
+        require __DIR__ . '/dns-suite.php';
+        break;
+    }
+}
+
+/* -------------------------------------------------------------------------
  * 4. Subdomains, reservations and DNS safety
  * ---------------------------------------------------------------------- */
 if (run_suite($only, 'subdomains')) {
@@ -526,7 +536,7 @@ if (run_suite($only, 'views')) {
     $t->check('asset() appends a version', (bool) preg_match('/\?v=\d+$/', asset('css/app.css')), asset('css/app.css'));
     $t->check('every public view file exists', (static function (): bool {
         $views = ['home', 'extensions', 'abuse', 'auth/login', 'auth/register', 'errors/404', 'errors/403', 'errors/setup',
-            'dashboard', 'admin/overview', 'admin/domains', 'admin/reservations', 'admin/users', 'admin/abuse',
+            'dashboard', 'admin/overview', 'admin/domains', 'admin/dns', 'admin/reservations', 'admin/users', 'admin/abuse',
             'layouts/public', 'layouts/app', 'layouts/admin', 'partials/navbar', 'partials/footer', 'partials/flashes'];
 
         foreach ($views as $view) {

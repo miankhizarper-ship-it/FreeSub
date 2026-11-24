@@ -3,10 +3,14 @@
 declare(strict_types=1);
 
 /**
- * Apply the Clerk identity migration to an existing installation.
+ * Apply pending migrations to an existing installation.
  *
  *   php database/migrate.php            apply (safe to re-run)
  *   php database/migrate.php --status   show what is already applied
+ *
+ * Two migrations are covered:
+ *   2026_11_001  Clerk identity (users.clerk_user_id, clerk_handoffs, ...)
+ *   2026_11_002  DNS engine (dns_records.domain_id, dns_records.last_synced_at)
  *
  * It never drops a column, never deletes a row and never touches users.role.
  * On MySQL/MariaDB each step is guarded by an information_schema check, because
@@ -26,7 +30,7 @@ require_once dirname(__DIR__) . '/includes/bootstrap.php';
 $statusOnly = in_array('--status', array_slice($argv, 1), true);
 $driver = Database::isSqlite() ? 'sqlite' : 'mysql';
 
-echo "FreeSub — Clerk identity migration\n";
+echo "FreeSub — pending migrations\n";
 echo "Driver: {$driver}\n\n";
 
 /**
@@ -285,6 +289,74 @@ if ($driver === 'sqlite') {
 
         return true;
     });
+
+    /* -- 2026_11_002 — DNS engine -------------------------------------- */
+
+    $dnsColumns = static function (): array {
+        $columns = [];
+
+        foreach (Database::select('PRAGMA table_info(dns_records)') as $row) {
+            $columns[] = (string) $row['name'];
+        }
+
+        return $columns;
+    };
+
+    $step('dns_records.domain_id', static function () use ($dnsColumns, $statusOnly): bool {
+        if (in_array('domain_id', $dnsColumns(), true)) {
+            return false;
+        }
+
+        if (!$statusOnly) {
+            // SQLite cannot add a column with a REFERENCES clause; the column is
+            // added plainly and backfilled from the owning subdomain. Integrity is
+            // enforced by the application and by the fresh-install schema.
+            Database::execute('ALTER TABLE dns_records ADD COLUMN domain_id INTEGER NULL');
+            Database::execute(
+                'UPDATE dns_records
+                    SET domain_id = (SELECT s.domain_id FROM subdomains s WHERE s.id = dns_records.subdomain_id)
+                  WHERE domain_id IS NULL'
+            );
+        }
+
+        return true;
+    });
+
+    $step('dns_records.last_synced_at', static function () use ($dnsColumns, $statusOnly): bool {
+        if (in_array('last_synced_at', $dnsColumns(), true)) {
+            return false;
+        }
+
+        if (!$statusOnly) {
+            Database::execute('ALTER TABLE dns_records ADD COLUMN last_synced_at TEXT NULL');
+        }
+
+        return true;
+    });
+
+    $step('dns_records domain index', static function () use ($statusOnly): bool {
+        if (sqlite_index_exists('dns_records_domain_index')) {
+            return false;
+        }
+
+        if (!$statusOnly) {
+            Database::execute('CREATE INDEX IF NOT EXISTS dns_records_domain_index ON dns_records (domain_id)');
+        }
+
+        return true;
+    });
+
+    $step('dns_records provider record index', static function () use ($statusOnly): bool {
+        if (sqlite_index_exists('dns_records_provider_record_index')) {
+            return false;
+        }
+
+        if (!$statusOnly) {
+            Database::execute('CREATE INDEX IF NOT EXISTS dns_records_provider_record_index ON dns_records (provider_record_id)');
+        }
+
+        return true;
+    });
 } else {
     $step('users.clerk_user_id', static function () use ($statusOnly): bool {
         if (mysql_has_column('users', 'clerk_user_id')) {
@@ -417,6 +489,63 @@ if ($driver === 'sqlite') {
 
         return true;
     });
+
+    /* -- 2026_11_002 — DNS engine -------------------------------------- */
+
+    $step('dns_records.domain_id', static function () use ($statusOnly): bool {
+        if (mysql_has_column('dns_records', 'domain_id')) {
+            return false;
+        }
+
+        if (!$statusOnly) {
+            Database::execute(
+                'ALTER TABLE dns_records
+                   ADD COLUMN domain_id BIGINT UNSIGNED NULL DEFAULT NULL
+                   COMMENT \'Root domain (zone) this record belongs to\' AFTER id'
+            );
+            Database::execute(
+                'UPDATE dns_records
+                   JOIN subdomains ON subdomains.id = dns_records.subdomain_id
+                    SET dns_records.domain_id = subdomains.domain_id
+                  WHERE dns_records.domain_id IS NULL'
+            );
+            Database::execute(
+                'ALTER TABLE dns_records
+                   ADD CONSTRAINT dns_records_domain_id_foreign FOREIGN KEY (domain_id)
+                   REFERENCES domains (id) ON DELETE SET NULL ON UPDATE CASCADE'
+            );
+        }
+
+        return true;
+    });
+
+    $step('dns_records.last_synced_at', static function () use ($statusOnly): bool {
+        if (mysql_has_column('dns_records', 'last_synced_at')) {
+            return false;
+        }
+
+        if (!$statusOnly) {
+            Database::execute(
+                'ALTER TABLE dns_records
+                   ADD COLUMN last_synced_at TIMESTAMP NULL DEFAULT NULL
+                   COMMENT \'When the remote record was last compared with this row\' AFTER last_error'
+            );
+        }
+
+        return true;
+    });
+
+    $step('dns_records domain index', static function () use ($statusOnly): bool {
+        if (mysql_has_index('dns_records', 'dns_records_domain_index')) {
+            return false;
+        }
+
+        if (!$statusOnly) {
+            Database::execute('ALTER TABLE dns_records ADD KEY dns_records_domain_index (domain_id)');
+        }
+
+        return true;
+    });
 }
 
 echo "\n";
@@ -439,6 +568,7 @@ if (!$statusOnly) {
     echo "\nNext:\n";
     echo "  1. php database/clerk-check.php      verify the Clerk configuration\n";
     echo "  2. php database/link-clerk.php       bind existing accounts to Clerk ids\n";
+    echo "  3. php database/dns-sync.php --dry-run   inspect DNS state (read-only)\n";
 }
 
 exit(0);

@@ -21,17 +21,31 @@ $harness = new ClerkTestHarness();
 
 // Authorized parties must match the origin the browser actually used, which the
 // test client controls per request.
+//
+// The origin comes from FREESUB_E2E_ORIGIN (exported by tests/http-clerk.sh for
+// whatever port was requested). Hard-coding a port here made `tests/http-clerk.sh
+// 8100` fail with `origin_rejected` on every bridge call — a harness defect that
+// looked exactly like an authentication regression.
+$origin = rtrim((string) (getenv('FREESUB_E2E_ORIGIN') ?: 'http://localhost:8099'), '/');
+$port = (string) (parse_url($origin, PHP_URL_PORT) ?: '8099');
+
 $GLOBALS['FREESUB_CONFIG_OVERRIDE'] = [
     'clerk' => [
-        'authorized_parties' => array_values(array_filter([
-            'http://localhost:8099',
-            'http://127.0.0.1:8099',
+        'authorized_parties' => array_values(array_unique([
+            $origin,
+            'http://localhost:' . $port,
+            'http://127.0.0.1:' . $port,
         ])),
     ],
 ];
 
 $harness->installVerifier();
 $harness->installApiClient();
+
+// Cloudflare is intentionally NOT installed here: the DNS diagnostics page must
+// work with no provider configured, and no test in this run may reach a zone.
+// (The DNS engine itself is covered by tests/dns-suite.php with its own double.)
+CloudflareApiClient::setDefaultTransport(null);
 $harness->addUser('user_2legacy', 'legacy-admin@clerk-test.local', 'Legacy', 'Admin');
 $harness->addUser('user_2handoff', 'handoff@clerk-test.local', 'Alan', 'Turing');
 

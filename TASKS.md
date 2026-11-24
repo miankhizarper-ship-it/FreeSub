@@ -131,14 +131,75 @@ swallowed tables preceded by a comment. Details and regression tests are in
 
 ---
 
-## Task 03 — DNS automation (Next)
+## Task 03 — DNS engine (Done, pending live verification)
 
-- [ ] `CloudflareDnsProvider implements DnsProviderInterface` (token from `.env`, zone id from `domains.zone_reference`)
-- [ ] Reconciliation CLI (`php database/dns-sync.php`) that walks `dns_records` where `status = 'pending'`
-- [ ] Verify the record through a DNS lookup before flipping a subdomain to `active`
-- [ ] Retry/backoff and `last_error` reporting; idempotent create/update/delete
-- [ ] Deletion workflow for released subdomains (remove remote records first, then mark `terminated`)
-- [ ] Admin UI to inspect per-subdomain DNS state and re-run sync
+The integration engine is built and covered by mocked tests. What is **not**
+done — deliberately — is turning it on for users: public subdomain registration
+stays disabled, and no subdomain is marked `active` by this work.
+
+### Completed
+
+- [x] `CloudflareDnsProvider implements DnsProviderInterface`; the original five
+      methods keep their signatures, the record API
+      (`listRecords`/`findRecord`/`createRecord`/`updateRecord`/`deleteRecord`/
+      `verifyZone`) is additive
+- [x] `CloudflareApiClient`: cURL with connect + request timeouts, HTTP status and
+      `success`/`errors` parsing, `CloudflareApiException` with a stable
+      `reason()`, structured `DnsLog` that scrubs the token
+- [x] Retry policy: reads retry on 429/5xx/transport failure with exponential
+      backoff and `Retry-After`; **writes are never retried**
+- [x] Ambiguous create handling: the zone is re-read and a landed record is
+      adopted instead of duplicated (`DnsManager::createForSubdomain`)
+- [x] Zone verification against `DNS_ROOT_DOMAIN` before any operation, incl.
+      `zone_mismatch` / `zone_pending` / `not_found` / `auth`
+- [x] Record rules: A/AAAA/CNAME only, in-zone names, reserved and all-numeric
+      labels refused, wildcards refused, public-only IPv4/IPv6 (RFC1918,
+      loopback, link-local/metadata, CGNAT, multicast, TEST-NET, ULA,
+      IPv4-mapped), CNAME target rules, supported TTLs, never proxied
+- [x] Additive migration `2026_11_002`: `dns_records.domain_id` (FK, backfilled),
+      `dns_records.last_synced_at`, two indexes — guarded in `database/migrate.php`
+      for both MySQL and SQLite
+- [x] Lifecycle in `DnsManager`: create (validate → conflict → zone → pending row
+      → provider → persist id → audit), update, delete (owned id only, soft delete,
+      audited), sync (report only — never deletes or recreates)
+- [x] Admin page `admin/dns.php`: connection status, verified zone, record
+      count, recent sync errors, operation history, read-only connection test and
+      comparison; no token, no headers, no mutation control
+- [x] Read-only CLI `database/dns-sync.php` (`--json`, `--domain`, no write flag)
+- [x] Tests: `dns-validate`, `dns-client`, `dns-lifecycle`, `dns-security`
+      (161 assertions) plus an optional `dns-live` read-only suite
+- [x] End-to-end admin checks in `tests/http-clerk.sh` (page guards, CSRF, no
+      token in HTML, unconfigured behaviour)
+
+### Deliberately not implemented
+
+- Public subdomain registration and any user-facing DNS write path
+- Flipping a subdomain to `active` (needs a verified record *and* an owner
+  decision to launch)
+- Wildcard records, nameserver changes, proxying, `MX`/`TXT`/`CAA` management
+- Automatic repair: sync reports discrepancies for an operator, it never applies
+  them
+- Bulk deletion of any kind
+
+### Verification status
+
+| Claim | Status |
+|-------|--------|
+| Mocked test suites | **passed** (`php tests/run.php`, 448 assertions) |
+| Live Cloudflare connection | **not verified** — no credentials in the delivery environment |
+| DNS mutations against a real zone | **not verified** — not attempted |
+
+To close the last two: follow [README → Verifying the integration](README.md#verifying-the-integration).
+
+## Task 03b — DNS provisioning workflow (Next)
+
+- [ ] Queue/CLI worker that provisions `pending` subdomains and flips them to
+      `active` only after the record reads back from the zone
+- [ ] DNS lookup confirmation (`A`/`AAAA`/`CNAME` resolution) before `active`
+- [ ] Deletion workflow for released subdomains (remote record first, then
+      `terminated`), with the same ownership rules
+- [ ] Decide whether an operator may re-run sync with `--apply` for the
+      `missing`/`modified` classes only
 
 ## Task 04 — Accounts & email (Next)
 

@@ -194,6 +194,7 @@ CREATE TABLE IF NOT EXISTS `subdomains` (
 -- ---------------------------------------------------------------------------
 CREATE TABLE IF NOT EXISTS `dns_records` (
     `id` BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+    `domain_id` BIGINT UNSIGNED NULL DEFAULT NULL COMMENT 'Root domain (zone) this record belongs to',
     `subdomain_id` BIGINT UNSIGNED NOT NULL,
     `type` ENUM('A', 'AAAA', 'CNAME', 'TXT', 'MX') NOT NULL,
     `name` VARCHAR(190) NOT NULL COMMENT 'Relative or absolute record name',
@@ -204,14 +205,18 @@ CREATE TABLE IF NOT EXISTS `dns_records` (
     `provider_record_id` VARCHAR(190) NULL DEFAULT NULL COMMENT 'Remote id, e.g. Cloudflare record id',
     `status` ENUM('pending', 'active', 'failed', 'deleted') NOT NULL DEFAULT 'pending',
     `last_error` VARCHAR(500) NULL DEFAULT NULL,
+    `last_synced_at` TIMESTAMP NULL DEFAULT NULL COMMENT 'When the remote record was last compared with this row',
     `created_at` TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
     `updated_at` TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
     PRIMARY KEY (`id`),
     UNIQUE KEY `dns_records_subdomain_type_name_unique` (`subdomain_id`, `type`, `name`),
     KEY `dns_records_status_index` (`status`),
     KEY `dns_records_provider_record_index` (`provider_record_id`),
+    KEY `dns_records_domain_index` (`domain_id`),
     CONSTRAINT `dns_records_subdomain_id_foreign` FOREIGN KEY (`subdomain_id`)
-        REFERENCES `subdomains` (`id`) ON DELETE CASCADE ON UPDATE CASCADE
+        REFERENCES `subdomains` (`id`) ON DELETE CASCADE ON UPDATE CASCADE,
+    CONSTRAINT `dns_records_domain_id_foreign` FOREIGN KEY (`domain_id`)
+        REFERENCES `domains` (`id`) ON DELETE SET NULL ON UPDATE CASCADE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 -- ---------------------------------------------------------------------------

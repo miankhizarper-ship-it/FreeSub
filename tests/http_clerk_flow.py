@@ -303,6 +303,38 @@ connection.close()
 check("migrated administrator keeps the admin role", role is not None and role[0] == "admin", role)
 check("administrator identity was attached, not duplicated", role is not None and role[1] == "user_2legacy", role)
 
+print("DNS diagnostics (admin only)")
+# The page must render for an administrator, expose no credential, and refuse any
+# mutating verb. Cloudflare is deliberately unconfigured in this run: the engine
+# must degrade to "disabled", never to "attempted".
+dns_page = admin.get(f"{BASE}/admin/dns.php")
+check("administrator can open the DNS diagnostics page", dns_page.status_code == 200, dns_page.status_code)
+check("DNS page states the provider", "cloudflare" in dns_page.text or "none" in dns_page.text)
+check("DNS page never renders a token value", "CLOUDFLARE_API_TOKEN=" not in dns_page.text
+      and "Bearer " not in dns_page.text and "sk_test" not in dns_page.text)
+check("DNS page exposes the read-only connection test", "test_connection" in dns_page.text)
+check("DNS page exposes no record mutation control",
+      "createRecord" not in dns_page.text and "deleteRecord" not in dns_page.text)
+
+dns_no_csrf = admin.post(f"{BASE}/admin/dns.php", data={"action": "test_connection"}, allow_redirects=False)
+check("DNS actions require CSRF", dns_no_csrf.status_code == 419, dns_no_csrf.status_code)
+
+dns_token = csrf(dns_page)
+dns_unknown = admin.post(f"{BASE}/admin/dns.php", data={"action": "bogus", "_token": dns_token},
+                         allow_redirects=False)
+check("an unknown DNS action is rejected without side effects", dns_unknown.status_code in (302, 303),
+      dns_unknown.status_code)
+
+dns_test = admin.post(f"{BASE}/admin/dns.php",
+                      data={"action": "test_connection", "_token": dns_token, "domain_id": 1},
+                      allow_redirects=False)
+check("the connection test is handled by the server", dns_test.status_code in (302, 303), dns_test.status_code)
+check("the connection test does not crash when unconfigured",
+      admin.get(f"{BASE}/admin/dns.php").status_code == 200)
+
+check("a normal user is denied the DNS page",
+      session.get(f"{BASE}/admin/dns.php", allow_redirects=False).status_code in (302, 303, 403))
+
 print("Logout")
 # Use the administrator session: it is the only one still valid at this point,
 # because the webhook above deliberately detached the first account.

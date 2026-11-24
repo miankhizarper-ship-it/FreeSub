@@ -17,6 +17,7 @@ FreeSub lets registered users search for a subdomain on a root domain the platfo
 - [Database](#database)
 - [Project structure](#project-structure)
 - [Authentication (Clerk)](#authentication-clerk)
+- [DNS engine (Cloudflare)](#dns-engine-cloudflare)
 - [Security model](#security-model)
 - [How root domains work](#how-root-domains-work)
 - [Tests](#tests)
@@ -175,7 +176,13 @@ Everything is read from the environment (`.env` or real env vars). The full list
 | `CLERK_SESSION_RECHECK` | Seconds between server-side session-liveness checks (0 disables) |
 | `CLERK_BREAK_GLASS` | `true` enables the CLI-only offline administrator path |
 | `BREAK_GLASS_TTL` | Lifetime of a break-glass link in seconds (default 300) |
-| `DNS_PROVIDER`, `CLOUDFLARE_*` | Reserved for the DNS integration (unused in this build) |
+| `DNS_PROVIDER` | `none` (default) or `cloudflare`. Anything else, or a missing token/zone, degrades to `none` |
+| `DNS_ROOT_DOMAIN` | The single apex this installation may write to (default `kharcha.info`). A zone that does not match it is refused before any record is touched |
+| `CLOUDFLARE_API_TOKEN` | **Server-only** secret, scoped to one zone. Never stored in the database, never rendered, never logged |
+| `CLOUDFLARE_ZONE_ID` | 32 hex characters from the zone's Overview page. A public identifier — safe in `domains.zone_reference` |
+| `CLOUDFLARE_API_BASE_URL` | Defaults to `https://api.cloudflare.com/client/v4`; `http` is only accepted for loopback addresses |
+| `CLOUDFLARE_*_TIMEOUT`, `CLOUDFLARE_MAX_RETRIES` | Connect/request timeouts and the read-only retry budget |
+| `CLOUDFLARE_DEFAULT_TTL` | TTL for new records; `1` = automatic |
 
 `config/app.php`, `config/database.php` and `config/env.php` only read these values; none of them may be served over HTTP (blocked by `.htaccess`).
 
@@ -191,7 +198,7 @@ Everything is read from the environment (`.env` or real env vars). The full list
 | `domains` | Root domains owned by the platform | `UNIQUE(root_domain)`, generated `extension`, `dns_provider`, `zone_reference`, per-domain `subdomain_quota` |
 | `reservations` | A user's request for a label | FKs to `users` (cascade) and `domains` (restrict), reviewed-by FK |
 | `subdomains` | Provisioned hostnames | `UNIQUE(fqdn)`, `UNIQUE(domain_id, label)`, `UNIQUE(reservation_id)` |
-| `dns_records` | Desired DNS state per subdomain | `UNIQUE(subdomain_id, type, name)`, provider record id |
+| `dns_records` | Desired DNS state per subdomain | `UNIQUE(subdomain_id, type, name)`, `domain_id` + `provider_record_id` + `last_synced_at`, status workflow `pending → active/failed → deleted` |
 | `audit_logs` | Append-only trail | FKs with `ON DELETE SET NULL`, JSON `context` |
 | `abuse_reports` | Public reports | FK to `subdomains`, reviewer FK, status workflow |
 
@@ -231,7 +238,8 @@ freesub/
 │   ├── migrations/
 │   │   └── 2026_11_001_clerk_identity.sql
 │   ├── install.php                CLI installer (idempotent; --fresh to reset)
-│   ├── migrate.php                Applies (or --status shows) the Clerk migration
+│   ├── migrate.php                Applies (or --status shows) pending migrations
+│   ├── dns-sync.php               Read-only DNS inspection (operator command)
 │   ├── create-admin.php           CLI administrator provisioning
 │   ├── link-clerk.php             Attach/list Clerk identities for existing accounts
 │   ├── clerk-check.php            Configuration + connectivity check (no secrets printed)
@@ -246,7 +254,9 @@ freesub/
 │   ├── services/
 │   │   ├── Clerk/          ClerkConfig, ClerkTokenVerifier, ClerkApiClient,
 │   │   │                   ClerkHandoff, ClerkWebhook, ClerkToken
-│   │   ├── DnsProvider.php DnsProvider (interface + null driver)
+│   │   ├── Dns/            CloudflareDnsProvider, CloudflareApiClient, DnsLog,
+│   │   │                   DnsRecordValidator, DnsRecordRepository, DnsManager
+│   │   ├── DnsProvider.php DnsProvider (interface, null driver, factory)
 │   │   └── SubdomainService.php
 │   └── views/              Layouts, partials (incl. clerk-auth.php), pages, admin screens
 ├── clerk/
@@ -255,7 +265,9 @@ freesub/
 ├── tests/
 │   ├── run.php             Test runner (all suites listed under Tests)
 │   ├── clerk-suite.php     Clerk suites (verification, sync, handoff, sessions, webhooks)
+│   ├── dns-suite.php       DNS suites (rules, client, lifecycle, security, optional live)
 │   ├── support/ClerkTestHarness.php   RSA signing + stubbed Backend API
+│   ├── support/CloudflareTestDouble.php   In-memory Cloudflare v4 API
 │   ├── fixtures/           Test-only RSA key pairs (never used for anything real)
 │   ├── http-journeys.php   Foundation HTTP journeys via cURL
 │   ├── http-clerk.sh       End-to-end Clerk flow over real HTTP
@@ -470,6 +482,105 @@ Only after those checks pass should the Clerk migration be called complete.
 
 ---
 
+## DNS engine (Cloudflare)
+
+The engine is **read-only in this build**. It can prove that a zone belongs to
+`kharcha.info`, list its records, and compare them with what FreeSub believes it
+owns. Nothing in the web application creates, changes or deletes a DNS record,
+public subdomain registration stays disabled, and no subdomain is ever marked
+`active` without a verified record.
+
+### What exists
+
+| Layer | File | Responsibility |
+|-------|------|----------------|
+| Contract | `includes/services/DnsProvider.php` | The original five methods, unchanged; `NullDnsProvider` (never claims success); the factory |
+| Provider | `includes/services/Dns/CloudflareDnsProvider.php` | Implements the contract, adds `listRecords` / `findRecord` / `createRecord` / `updateRecord` / `deleteRecord` / `verifyZone` |
+| HTTP | `includes/services/Dns/CloudflareApiClient.php` | cURL, timeouts, status and `success`/`errors` parsing, retry policy, error classification |
+| Rules | `includes/services/Dns/DnsRecordValidator.php` | Names, IPv4/IPv6, private ranges, CNAME targets, TTLs, reserved labels |
+| State | `includes/services/Dns/DnsRecordRepository.php` | `dns_records` reads/writes, always scoped to a root domain |
+| Lifecycle | `includes/services/Dns/DnsManager.php` | create / update / delete / reconcile + audit |
+| Admin | `admin/dns.php` + `includes/views/admin/dns.php` | Read-only diagnostics, connection test, comparison |
+| CLI | `database/dns-sync.php` | Read-only inspection for operators |
+
+### Getting the Zone ID and a restricted token
+
+1. Cloudflare dashboard → the `kharcha.info` zone → **Overview** → *Zone ID*
+   (32 hex characters). This is the value for `CLOUDFLARE_ZONE_ID`.
+2. **My Profile → API Tokens → Create Token → Create Custom Token** with exactly:
+   - `Zone` → `DNS` → `Edit`
+   - `Zone` → `Zone` → `Read`
+   - *Zone Resources*: **Include → Specific zone → kharcha.info**
+   Do not use the Global API Key, and do not grant "All zones".
+3. Put the token in `.env` (never in the database, never in a commit):
+
+```dotenv
+DNS_PROVIDER=cloudflare
+DNS_ROOT_DOMAIN=kharcha.info
+CLOUDFLARE_API_TOKEN=…      # server-side only
+CLOUDFLARE_ZONE_ID=…        # public identifier
+```
+
+A token that can see other zones is harmless: the engine verifies the zone name
+against `DNS_ROOT_DOMAIN` on every operation and refuses a mismatch
+(`zone_mismatch`) before touching a record.
+
+### Running it
+
+```bash
+# Read-only inspection: verifies the zone, then compares records. Writes nothing.
+php database/dns-sync.php
+php database/dns-sync.php --json | python3 -m json.tool
+```
+
+Then **Admin → DNS diagnostics**: connection state, the verified zone and its
+nameservers, record counts, recent sync errors and the DNS operation history.
+The page has no token, no header and no mutation control — the only network call
+it can make is the read-only *Test connection* action.
+
+### Rules the engine enforces
+
+- Only `A`, `AAAA` and `CNAME`. `NS`, `MX`, `TXT` and `CAA` can never be written
+  through this engine, by any caller.
+- Names must be inside `DNS_ROOT_DOMAIN`, at most three labels deep, never the
+  apex, never a wildcard, never a reserved label (`www`, `admin`, `mail`, `ns1`, …
+  from `subdomains.reserved_labels`).
+- Addresses must be public: RFC1918, loopback, link-local (including
+  `169.254.169.254`), CGNAT, multicast, TEST-NET and the IPv6 equivalents
+  (ULA, link-local, documentation, IPv4-mapped private) are all refused.
+- A CNAME may not share a name with anything else and may not point at an IP,
+  a URL, a port, `.local`/`.internal` or the zone apex.
+- `proxied` is always `false`; a user cannot enable the orange cloud.
+- Proxied/CDN behaviour, nameservers and wildcard records are never changed.
+
+### Failure policy
+
+| Situation | Behaviour |
+|-----------|-----------|
+| Read fails with 429/5xx/timeout | Retried up to `CLOUDFLARE_MAX_RETRIES` with exponential backoff, honouring `Retry-After` |
+| **Create fails with a timeout or 5xx** | **Never retried.** The zone is re-read first; if our record is there with the same value it is adopted, otherwise the row is marked `failed` with the reason |
+| Delete | Exactly one Cloudflare id, taken from our own row. A name-based sweep is never used |
+| Sync | Reports missing / modified / unmanaged records. **Never** deletes or recreates anything |
+
+### Verifying the integration
+
+Be precise about which of these has actually been done:
+
+| Claim | How to prove it | Done here? |
+|-------|-----------------|------------|
+| `MOCK TESTS PASSED` | `php tests/run.php` (suite `dns-*`, mocked transport, no credentials) | **yes** |
+| `LIVE CONNECTION VERIFIED` | `FREESUB_DNS_LIVE=1 CLOUDFLARE_API_TOKEN=… CLOUDFLARE_ZONE_ID=… php tests/run.php dns-live`, or `php database/dns-sync.php` | **no** — no Cloudflare credentials in the delivery environment |
+| `DNS MUTATIONS VERIFIED` | A deliberate create → read-back → delete against the zone, on a throwaway name, by an operator | **no** — not attempted; the engine has no web path that writes in this build |
+
+The mocked suites cover zone verification (match, mismatch, non-active, unknown),
+401/403/429/5xx, transport timeouts, invalid IPv4/IPv6, private-IP rejection,
+invalid CNAME targets, duplicate and cross-subdomain conflicts, reserved labels,
+create, delete ownership, unknown-record preservation, response parsing and
+audit logging — but they prove the engine is *correct against the documented
+API*, not that a live zone accepts it.
+
+---
+
 ## Security model
 
 **Authentication.** Clerk handles every credential: registration, sign-in, Google OAuth, e-mail verification and password recovery all happen inside Clerk's components mounted on our own pages with the official `clerk-js` browser build. FreeSub stores **no passwords for web users**. See [Authentication](#authentication-clerk) for the flow. Sessions regenerate on login/logout and are bound to a fingerprint of the client; the stored user is re-loaded from the database on every request, so a suspended, deleted or re-linked account loses access immediately.
@@ -496,7 +607,8 @@ Only after those checks pass should the Clerk migration be called complete.
 2. The landing page, `/extensions.php`, the dashboard and `api/check.php` all query that table — nothing is hard-coded.
 3. A domain is offered publicly only when `is_active = 1 AND is_public = 1 AND registration_status = 'ready'`.
 4. `zone_reference` stores a **public** identifier (e.g. a Cloudflare zone id). API tokens stay in `.env` and are never written to the database or shipped to the browser.
-5. `includes/services/DnsProvider.php` defines the contract (`isHostnameAvailable`, `createHostname`, `deleteHostname`). The shipped driver is `NullDnsProvider`, which always answers "automation not enabled" — the Cloudflare driver can be added without touching callers.
+5. `includes/services/DnsProvider.php` defines the contract (`isHostnameAvailable`, `createHostname`, `deleteHostname`). Two drivers ship: `NullDnsProvider` (always "automation not enabled") and `CloudflareDnsProvider`, which is selected only when `DNS_PROVIDER=cloudflare` and both a token and a zone id are present. A half-configured environment degrades to the null driver.
+6. DNS mutations are not reachable from the web in this build. See [DNS engine (Cloudflare)](#dns-engine-cloudflare).
 
 ---
 
@@ -536,14 +648,26 @@ Suites:
 | `clerk-session` | session binding, invalid/legacy sessions, fingerprint mismatch, suspension, logout, admin retention |
 | `clerk-webhook` | svix HMAC verification, tampering, replay window, key rotation |
 | `clerk-webhook-effects` | `user.updated` / `user.deleted` / session events applied without creating or deleting accounts |
+| `dns-validate` | record rules: in-zone names, foreign/apex/wildcard/reserved rejection, public-only IPv4 and IPv6, CNAME targets, allowed types and TTLs |
+| `dns-client` | Cloudflare client: zone verification (match/mismatch/pending/unknown), 401/403/429/5xx mapping, read retries, `success=false` on HTTP 200, path/identifier guards, token never logged |
+| `dns-lifecycle` | create → persist id → audit, duplicate/cross-subdomain conflict, ambiguous create reconciled (not retried), delete ownership, unknown-record preservation, sync reporting |
+| `dns-security` | factory degrades without credentials, admin-only + CSRF-wrapped page, no token in source/view, no mutation on the page, interface unchanged |
+| `dns-live` | optional read-only check against a real zone (needs `FREESUB_DNS_LIVE=1` and real credentials; skipped otherwise) |
 | `subdomains` | labels, reservations, quota, duplicate fqdn, no DNS on reservation |
 | `audit` | audit trail and abuse reports |
 | `views` | every view/link/redirect target exists |
 | `http` | HTTP journeys (needs a running server) |
 
-Current status: **287 assertions green** on PHP 8.5 with SQLite, plus **61 end-to-end HTTP checks** in `tests/http-clerk.sh`. The MySQL schema in `database/schema.sql` was validated against a real MariaDB 13.1 engine (import, generated column, FKs, cascades, idempotent re-run).
+Current status: **448 assertions green** on PHP 8.5 with SQLite, plus **71 end-to-end HTTP checks** in `tests/http-clerk.sh`. The MySQL schema in `database/schema.sql` was validated against a real MariaDB 13.1 engine (import, generated column, FKs, cascades, idempotent re-run).
 
 The tests use a throwaway database file (`storage/test-<pid>.sqlite`) and delete it afterwards. They never touch production data.
+
+The DNS suites need no network and no Cloudflare credential: the API is replaced
+at `CloudflareApiClient::setDefaultTransport()` by an in-memory double
+(`tests/support/CloudflareTestDouble.php`) that can script zones, records, rate
+limits, 5xx responses and a "write landed but the response died" timeout. They
+prove the engine behaves correctly against the documented API — not that a live
+zone accepts it (see [Verifying the integration](#verifying-the-integration)).
 
 The Clerk suites need no network and no real Clerk secret: tokens are signed with a committed **test-only** RSA key pair (`tests/fixtures/`), served to the verifier as a JWKS document, and the Backend API is replaced at `ClerkApiClient`'s transport seam. What they cannot prove is that a live Clerk instance issues tokens shaped the way we expect — that requires the owner's dashboard, see [Verifying against Clerk](#verifying-against-clerk).
 
@@ -553,7 +677,7 @@ The Clerk suites need no network and no real Clerk secret: tokens are signed wit
 
 Tracked in [`TASKS.md`](TASKS.md). Highlights:
 
-1. **Cloudflare driver** implementing `DnsProviderInterface`, plus a queue/CLI worker that reconciles `dns_records` and flips subdomains to `active` only after verification.
+1. **DNS provisioning workflow** — the Cloudflare driver is built and tested; what remains is the decision to enable public registration: a queue/CLI worker that reconciles `dns_records` and flips subdomains to `active` only after a verified record exists.
 2. **Transactional email** for reservation/subdomain notifications (account e-mail verification and password reset are handled by Clerk).
 3. **Public API tokens** for users (programmatic reservation management) with scoped keys.
 4. **Admin audit log browser** with filtering and export.

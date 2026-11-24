@@ -193,7 +193,14 @@ require_once FREESUB_ROOT . '/includes/models/Subdomain.php';
 require_once FREESUB_ROOT . '/includes/models/Reservation.php';
 require_once FREESUB_ROOT . '/includes/models/DnsRecord.php';
 require_once FREESUB_ROOT . '/includes/models/AbuseReport.php';
+// The interface first: every driver implements it.
 require_once FREESUB_ROOT . '/includes/services/DnsProvider.php';
+require_once FREESUB_ROOT . '/includes/services/Dns/DnsLog.php';
+require_once FREESUB_ROOT . '/includes/services/Dns/CloudflareApiClient.php';
+require_once FREESUB_ROOT . '/includes/services/Dns/DnsRecordValidator.php';
+require_once FREESUB_ROOT . '/includes/services/Dns/CloudflareDnsProvider.php';
+require_once FREESUB_ROOT . '/includes/services/Dns/DnsRecordRepository.php';
+require_once FREESUB_ROOT . '/includes/services/Dns/DnsManager.php';
 require_once FREESUB_ROOT . '/includes/services/SubdomainService.php';
 
 /* -------------------------------------------------------------------------

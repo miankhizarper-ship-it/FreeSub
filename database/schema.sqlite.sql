@@ -124,6 +124,9 @@ CREATE INDEX IF NOT EXISTS subdomains_status_index ON subdomains (status);
 
 CREATE TABLE IF NOT EXISTS dns_records (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
+    -- Denormalised from subdomains so a record can be traced to its zone even
+    -- after the subdomain row is gone. NULL only for legacy rows.
+    domain_id INTEGER NULL REFERENCES domains (id) ON DELETE SET NULL,
     subdomain_id INTEGER NOT NULL REFERENCES subdomains (id) ON DELETE CASCADE,
     type TEXT NOT NULL CHECK (type IN ('A', 'AAAA', 'CNAME', 'TXT', 'MX')),
     name VARCHAR(190) NOT NULL,
@@ -134,11 +137,14 @@ CREATE TABLE IF NOT EXISTS dns_records (
     provider_record_id VARCHAR(190) NULL,
     status TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending', 'active', 'failed', 'deleted')),
     last_error VARCHAR(500) NULL,
+    last_synced_at TEXT NULL,
     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
     updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 CREATE UNIQUE INDEX IF NOT EXISTS dns_records_subdomain_type_name_unique ON dns_records (subdomain_id, type, name);
 CREATE INDEX IF NOT EXISTS dns_records_status_index ON dns_records (status);
+CREATE INDEX IF NOT EXISTS dns_records_domain_index ON dns_records (domain_id);
+CREATE INDEX IF NOT EXISTS dns_records_provider_record_index ON dns_records (provider_record_id);
 
 CREATE TABLE IF NOT EXISTS audit_logs (
     id INTEGER PRIMARY KEY AUTOINCREMENT,

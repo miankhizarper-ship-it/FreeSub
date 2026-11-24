@@ -9,8 +9,10 @@ declare(strict_types=1);
  * interface and the "null" driver exist so the rest of the application can be
  * written against a stable contract while the Cloudflare driver is built.
  *
- * A future CloudflareDnsProvider will implement this interface using the token
- * from the environment (never from the database).
+ * CloudflareDnsProvider implements this interface using the token from the
+ * environment (never from the database). It adds the record-level operations
+ * (list/find/create/update/delete/verifyZone) as extra public methods so this
+ * contract — and every existing caller — stays unchanged.
  */
 
 interface DnsProviderInterface
@@ -86,13 +88,35 @@ final class NullDnsProvider implements DnsProviderInterface
 
 final class DnsProvider
 {
+    /**
+     * Instantiate a driver by name.
+     *
+     * 'cloudflare' only produces a live driver when a token *and* a zone id are
+     * configured; otherwise it falls back to NullDnsProvider, which never claims
+     * success. A misconfigured environment therefore degrades to "automation
+     * disabled", never to "automation attempted with half the credentials".
+     */
     public static function make(?string $name = null): DnsProviderInterface
     {
         $name = strtolower($name ?? (string) config('dns.provider', 'none'));
 
+        if ($name === 'cloudflare') {
+            $provider = new CloudflareDnsProvider();
+
+            if ($provider->isConfigured()) {
+                return $provider;
+            }
+
+            DnsLog::record('dns.cloudflare_not_configured', [
+                'token' => $provider->client()->isConfigured() ? 'present' : 'missing',
+                'zone_id' => $provider->client()->zoneId() !== '' ? 'present' : 'missing',
+            ]);
+
+            return new NullDnsProvider();
+        }
+
         /** @var DnsProviderInterface $provider */
         $provider = match ($name) {
-            // 'cloudflare' => new CloudflareDnsProvider(...), // future work
             default => new NullDnsProvider(),
         };
 

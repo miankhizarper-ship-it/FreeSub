@@ -15,6 +15,7 @@ $adminNav = [
     ['key' => 'admin', 'label' => 'Overview', 'href' => '/admin/index.php', 'icon' => 'gauge'],
     ['key' => 'admin-reservations', 'label' => 'Reservations', 'href' => '/admin/reservations.php', 'icon' => 'inbox'],
     ['key' => 'admin-domains', 'label' => 'Root domains', 'href' => '/admin/domains.php', 'icon' => 'globe-2'],
+    ['key' => 'admin-dns', 'label' => 'DNS diagnostics', 'href' => '/admin/dns.php', 'icon' => 'cloud-cog'],
     ['key' => 'admin-users', 'label' => 'Users', 'href' => '/admin/users.php', 'icon' => 'users'],
     ['key' => 'admin-abuse', 'label' => 'Abuse reports', 'href' => '/admin/abuse.php', 'icon' => 'shield-alert'],
 ];
