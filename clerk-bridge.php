@@ -126,12 +126,16 @@ if (!is_string($handoffJwt) || trim($handoffJwt) === '') {
 $result = ClerkHandoff::completeFromBrowserToken($handoffJwt, $origin);
 
 if ($result['ok'] !== true) {
+    // 5xx means "our side or Clerk's side is temporarily unable", so a browser
+    // or monitoring system can retry. `jwk_unavailable` belongs here: the token
+    // may be perfectly valid and the signing keys simply could not be fetched.
     $status = match ($result['reason']) {
         'not_configured' => 503,
         'clerk_unavailable' => 503,
+        ClerkTokenVerifier::REASON_KEY_UNAVAILABLE => 503,
         'account_inactive' => 403,
-        ClerkTokenVerifier::REASON_EXPIRED => 401,
-        ClerkTokenVerifier::REASON_MISSING => 401,
+        'origin_rejected' => 403,
+        'channel_mismatch', 'no_channel', 'channel_expired', 'too_many_attempts' => 403,
         default => 401,
     };
 

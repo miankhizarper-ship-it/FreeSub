@@ -129,6 +129,43 @@ if ($clerkEmail !== null) {
     echo "Resolved {$clerkEmail} -> {$clerkId}\n";
 }
 
+// Refuse to hand an administrator row to a Clerk user whose address Clerk has
+// not verified, and warn when the two addresses differ: that is the exact
+// shape of an account takeover, so it must be a deliberate decision.
+$client ??= new ClerkApiClient();
+
+if ($client->isConfigured()) {
+    try {
+        $clerkUser = $client->getUser((string) $clerkId);
+    } catch (ClerkApiException $exception) {
+        fwrite(STDERR, "Clerk lookup for {$clerkId} failed (status {$exception->status()}).\n");
+        exit(2);
+    }
+
+    if ($clerkUser === null) {
+        fwrite(STDERR, "Clerk has no user with id {$clerkId}.\n");
+        exit(1);
+    }
+
+    $verified = User::verifiedEmail($clerkUser);
+
+    if ($verified === null) {
+        fwrite(STDERR, "That Clerk user has no verified email address. Verify it in Clerk first.\n");
+        exit(1);
+    }
+
+    if (!hash_equals(strtolower((string) $user['email']), $verified)) {
+        fwrite(STDERR, "Refusing to link: the FreeSub account is {$user['email']}\n");
+        fwrite(STDERR, "but the Clerk user's verified address is {$verified}.\n");
+        fwrite(STDERR, "An administrator row must not change hands. Change the address in Clerk, or create\n");
+        fwrite(STDERR, "the FreeSub account from that verified address, and run this again.\n");
+        exit(1);
+    }
+} else {
+    echo "Note: CLERK_SECRET_KEY is not configured, so the Clerk user could not be checked.\n";
+    echo "      Verify the address matches {$user['email']} before continuing.\n";
+}
+
 try {
     $linked = User::attachClerkIdentity((int) $user['id'], (string) $clerkId);
 } catch (RuntimeException $exception) {

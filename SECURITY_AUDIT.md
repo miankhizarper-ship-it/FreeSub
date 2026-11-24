@@ -26,7 +26,8 @@ run on a networked machine.
 | Browser integration | **Pass** after one fix — every key the client script needs is emitted, asserted mechanically (§4 F11) |
 | Token verification | **Pass** — signature, `alg`, `kid`, `iss`, `exp`, `nbf`, `azp`, `sub`, with `iss` checked (the SDK does not) |
 | Session management | **Pass** after one fix — the client fingerprint is now re-checked on every resolution (§4 F2) |
-| Authorization / roles | **Pass** — server-side only, never from Clerk or the client |
+| Availability / error reporting | **Pass** after one fix — a Clerk or JWKS outage answers 503, not a misleading 401 (§4 F14) |
+| Authorization / roles | **Pass** after one critical fix — roles are server-side only, and an admin row can no longer be inherited by a web sign-in (§4 F12) |
 | CSRF / same-origin | **Pass** |
 | Secret hygiene | **Pass** — no secret in HTML, logs, URLs, database or responses |
 | Webhook trust | **Pass** — svix HMAC verified before parsing, replay window enforced |
@@ -34,7 +35,7 @@ run on a networked machine.
 | Break-glass path | **Pass** after two fixes; CLI-only, password-gated, flag-gated, audited |
 | Dependency posture | **Pass with a caveat** — SDK declared but not vendored (§6) |
 
-Eleven issues were found during this audit and have been fixed; they are listed in
+Fourteen issues were found across implementation and this final review, all fixed; they are listed in
 §4, because a report that only lists what currently looks fine is useless to the
 next reviewer. Five risks remain open and are listed in §5 — the most important
 being that none of this has been run against the live Clerk instance.
@@ -301,6 +302,58 @@ present in the rendered page — verified mechanically by grepping `config.<key>
 out of the script and comparing it with the embedded JSON, so this class of bug
 cannot come back silently.
 
+### F12 — An administrator row could be claimed by web sign-in (Critical)
+
+`User::syncFromClerk()` step 2 linked **any** existing row to a Clerk identity
+whose email Clerk reported as verified — including rows with `role='admin'`.
+An attacker who controls an administrator's email address (recycled address,
+re-registration after a lapse, a second Clerk user added to the same mailbox, or
+a compromised mailbox) could sign up with it and inherit the admin account, its
+id, its reservations and its role. Reproduced before the fix:
+
+```
+admin row id=3
+claimed id = 3  role = admin  linked=true
+>>> normal user now controls the admin account? YES (CRITICAL)
+```
+
+Note that `role` is *not* upgradable by metadata or claims (that control held),
+but *inheriting* a pre-existing admin row is a privilege escalation by a
+different route.
+
+**Fix.** Step 2 now refuses when the candidate row is an `admin`, unless the
+call passes `$force = true`, which only documented CLI code does. The message is
+neutral and does not disclose the account's address. `database/link-clerk.php` —
+the sanctioned path — was hardened at the same time: it now requires Clerk to
+report the address as **verified**, refuses when it does not match the local row,
+and never touches the role.
+
+*Covered by:* new suite `clerk-privilege` (12 assertions) — web claim refused,
+admin row unchanged, no ticket issued, address not echoed, normal accounts still
+link automatically and keep their id and role, CLI path still works.
+
+### F13 — `config()` mutated its own cache, so overrides could not be withdrawn (High, test seam / correctness)
+
+`config()` merged `$GLOBALS['FREESUB_CONFIG_OVERRIDE']` **into** its static cache,
+which made the override permanent for the rest of the process. It surfaced as a
+baffling failure: an audience test set `clerk.audiences = ['freesub']`, restored
+the previous override, and every later token test failed
+`token_invalid_audience`. The seam is test-only, but the defect is exactly the
+kind that hides production bugs — a value that cannot go back to how it was.
+
+**Fix:** merge into a copy and return that. *Covered by:* `security` →
+"config overrides are reversible", plus the previously failing rotation test.
+
+### F14 — JWKS outage was reported as a client error (Medium)
+
+`ClerkTokenVerifier` correctly returns `jwk_unavailable` when the key set cannot
+be fetched, but `clerk-bridge.php` mapped every unrecognised reason to **401**.
+A temporary Clerk outage therefore looked to the browser, to monitoring and to
+the user like "your token was rejected". **Fix:** `jwk_unavailable`,
+`not_configured` and `clerk_unavailable` now return **503**; channel and origin
+problems return **403**. *Covered by:* `clerk-token` → "unreachable JWKS is
+reported as key-unavailable"; exercised end to end through the bridge.
+
 ---
 
 ## 5. Open risks
@@ -358,15 +411,16 @@ web route that accepts a password.
 | Suite | Assertions | What it covers |
 |-------|-----------:|----------------|
 | `clerk-config` | 13 | key decoding, host/iss/JWKS derivation, diagnostics, secret-as-publishable rejection |
-| `clerk-token` | 22 | signature, tampering, foreign key, `alg` downgrade, expiry, `nbf`, `iss`, `azp`, `sub`, unknown `kid`, JWK→PEM, rotation |
-| `clerk-sync` | 22 | first sign-in, duplicates, legacy admin migration, FK preservation, unverified-email hijack, bound-identity conflict, banned user, metadata→role refusal |
+| `clerk-token` | 28 | signature, tampering, foreign key, `alg` downgrade, expiry, `nbf`, `iss`, `azp`, `aud` (5 cases), `sub`, unknown `kid`, unreachable JWKS, JWK→PEM, rotation |
+| `clerk-sync` | 24 | first sign-in, duplicates, admin claim refused, FK preservation, unverified-email hijack, bound-identity conflict, banned user, metadata→role refusal |
+| `clerk-privilege` | 12 | takeover attempts: admin row cannot be claimed (model + handoff), row untouched, no ticket, address not echoed, normal linking still works, CLI path works |
 | `clerk-handoff` | 31 | channel/state, single-use, replay, expiry, origin, outage, deleted user, break-glass tickets |
 | `clerk-session` | 22 | session keys, resolve, admin guard, logout, legacy session, fingerprint, suspension, break-glass gating, no secrets in session |
 | `clerk-webhook` | 14 | HMAC, tampering, wrong secret, replay window, rotation list, parse ordering |
 | `clerk-webhook-effects` | 17 | `user.updated`/`user.deleted`/session events, no provisioning, idempotency |
-| `env`, `security`, `auth`, `schema`, `subdomains`, `audit`, `views` | 125 | inherited controls (8+39+22+13+25+8+10), still green after the auth rewrite |
-| **Total** | **266** | all green, no network, isolated SQLite |
-| `tests/http-clerk.sh` | **58 checks** | real HTTP: both pages render, no password field, every config key the JS reads, guest redirects, bridge hardening, full handoff, replay, admin denial, webhook signature/replay/idempotency, administrator migration, logout |
+| `env`, `security`, `auth`, `schema`, `subdomains`, `audit`, `views` | 126 | inherited controls (8+40+22+13+25+8+10), still green after the auth rewrite |
+| **Total** | **287** | all green, no network, isolated SQLite |
+| `tests/http-clerk.sh` | **61 checks** | real HTTP: both pages render, no password field, every config key the JS reads, guest redirects, bridge hardening, full handoff, replay, admin denial, webhook signature/replay/idempotency, administrator migration, logout |
 
 Not covered by automated tests, and why: rendering of the Clerk components
 (themselves) needs a browser and network access to the frontend API; Google
@@ -391,3 +445,116 @@ OAuth needs real Google credentials; e-mail delivery needs a real inbox.
 6. Back up the database before `php database/migrate.php` on production MySQL.
 7. Rotate the secret key if it was ever pasted into a chat, ticket or shell
    history; `php database/clerk-check.php` will report a rejected key (exit 3).
+
+---
+
+## 8. Final review — endpoint conformance and remaining manual steps
+
+### 8.1 Endpoints and parameters, against Clerk's documented API
+
+| What we call / expose | Documented shape | Our use | Verified how |
+|---|---|---|---|
+| `POST /v1/clients/verify {token}` | returns a Client with `last_active_session_id` | `ClerkApiClient::verifyClientToken` | shape implemented, **not exercised live** |
+| `GET /v1/users/{id}` | a User object | authoritative record after token verification | harness + live-only |
+| `GET /v1/users?email_address=&limit=` | array, or `{data: []}` | `findUsersByEmail` for the CLI | both shapes handled |
+| `GET /v1/sessions/{id}` | a Session with `status` | periodic revocation check | harness + live-only |
+| `POST /v1/sessions/{id}/revoke` | revokes | logout | harness + live-only |
+| `POST /v1/sign_in_tokens {user_id, expires_in_seconds}` | a SignInToken | available, **not used** by this flow | unused |
+| `GET /v1/me` | instance record | `clerk-check.php` key validation | live-only |
+| `GET {frontendApi}/.well-known/jwks.json` | `{keys: [{kid, kty, n, e, alg, use}]}` | RS256 verification | test JWKS + live-only |
+| `https://{frontendApi}/npm/@clerk/clerk-js@<ver>/dist/clerk.browser.js` | browser bundle | `assets/js/clerk-auth.js` | URL shape only |
+| `session.getToken({template, skipCache})` | `Promise<string \| null>` | the handoff token | types inspected; live-only |
+| Webhook headers `svix-id`, `svix-timestamp`, `svix-signature` | HMAC-SHA256 over `{id}.{timestamp}.{body}` | `ClerkWebhook::verify` | implemented + tested |
+
+No endpoint is invented: every path above is from Clerk's documented Backend API
+or the svix webhook spec.
+
+### 8.2 Ticket redemption versus token verification — the distinction
+
+These are two different things and the code keeps them apart:
+
+* **Token verification** (`ClerkTokenVerifier::verify`) answers *"did Clerk issue
+  this, for this instance, for this subject, and is it current?"* It is
+  cryptographic, stateless, and has no notion of a user id supplied by the
+  browser: the only identity it produces is the `sub` **inside the signed
+  payload**.
+* **Ticket redemption** (`ClerkHandoff::redeem`) answers *"may this PHP session
+  finish signing in as the account this ticket was minted for?"* It is stateful:
+  a hashed row, a TTL, an atomic single-use claim, a re-check that the row is
+  still `active`, and a re-check that the row's `clerk_user_id` still matches the
+  identity the ticket was issued for.
+
+The browser never supplies a user id or email to either one. The only
+browser-supplied identifier anywhere in the flow is the opaque 64-hex ticket, and
+that is looked up by hash.
+
+### 8.3 Manual steps that require the live Clerk dashboard or API
+
+None of these can be done from this environment; each is a hard prerequisite for
+`READY FOR PRODUCTION`:
+
+1. **Create the `freesub_handoff` JWT template** (Configure → JWT Templates →
+   Blank). Without it `session.getToken({template})` resolves to `null` and the
+   page reports `template_missing`.
+2. **Copy the instance keys** into `.env` and confirm `php database/clerk-check.php`
+   exits `0` — this is the only step that proves the secret key is accepted by
+   `GET /v1/me` (which needs `api.clerk.com`).
+3. **Set `CLERK_AUTHORIZED_PARTIES` and `APP_URL`** to the exact origin browsed
+   to; a mismatch makes every bridge request `403 origin_rejected`.
+4. **Enable Google** under SSO connections if the OAuth path is required, and
+   confirm the redirect URI Clerk shows matches the deployment.
+5. **Register the webhook endpoint** (`https://…/clerk/webhook.php`, events
+   `user.*` and `session.*`) and store its `whsec_…`; then delete a throwaway user
+   and confirm the row is unlinked rather than deleted.
+6. **Link each administrator** with `php database/link-clerk.php` (see §4 F12) and
+   confirm the admin area opens.
+7. **Run the full browser walkthrough** in README → Verifying against Clerk,
+   including a second user, to confirm no duplicate rows appear.
+
+Until 1–2 and 7 have been done on a networked machine, the integration is
+unproven, however green the local suites are.
+
+### 8.4 Composer dependencies and production claims
+
+* **Runtime requirement: none.** No file under `includes/`, `clerk/`, `auth/` or
+  the root entry points loads `vendor/autoload.php` or references
+  `Clerk\Backend\`. Identity verification is native RS256 via `openssl`, and the
+  Backend API is called with PHP streams. `composer.json` declares
+  `clerkinc/backend-php: ^3.0` for deployments that want it, and
+  `composer.lock.md` documents the swap. **The official SDK is not used by the
+  code in this repository, and this report does not claim that it is.**
+* **Test-only keys.** `tests/fixtures/*.pem` are throwaway RSA key pairs, are
+  never referenced outside `tests/`, and are unreachable over HTTP (`404` from
+  both `router.php` and the `.htaccess` rule for `/tests`). Verified during this
+  review.
+* **Production mode.** `APP_ENV=production` + `APP_DEBUG=false` hides error
+  detail; the end-to-end suite was re-run in that configuration and passed.
+  `SECURITY_FORCE_HTTPS=true` (or a trusted `X-Forwarded-Proto: https`) forces
+  HTTPS and makes the session cookie `Secure` automatically; TLS itself is the
+  web server's job.
+
+---
+
+## 9. Verdict
+
+**`READY FOR LIVE CLERK TEST`** — not production-ready.
+
+What that means concretely:
+
+* Every control this task asked for is implemented, and each one has a
+  regression test that would fail if it were removed. 287 unit/integration
+  assertions and 61 end-to-end HTTP checks pass, the latter also with
+  `APP_DEBUG=false`.
+* Fourteen defects were found across implementation and this review, including
+  one **Critical** (an administrator row could be inherited by a web sign-in,
+  §4 F12) and two that would have broken sign-in entirely (§4 F1, F11). All are
+  fixed and covered.
+* No live Clerk call has been made. That is the only reason this is not
+  production-ready: the integration is unproven at the one boundary the local
+  suites cannot reach — a real instance minting a real `freesub_handoff` token and
+  a real secret key being accepted by the Backend API.
+
+To move to `READY FOR PRODUCTION`, complete §8.3 items 1–7 on a networked
+machine. Nothing in the code should need to change; if something does, it is
+most likely a configuration value (`iss`/`azp` mismatch) or the template name,
+and §8.1 plus the troubleshooting table name the specific cause.

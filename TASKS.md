@@ -83,7 +83,8 @@ now live entirely in Clerk; FreeSub stores only the link to a Clerk user id.
 - [x] `users.clerk_user_id` (unique), `username`, `avatar_url`, `auth_provider`, `last_login_at`; `password_hash` nullable
 - [x] `clerk_handoffs` (hashed tokens only) and `clerk_sessions` (mirror)
 - [x] `database/migrate.php`: guarded steps, `--status`, transactional SQLite rebuild with row-count verification
-- [x] Existing accounts (and their admins) migrate by verified e-mail — ids, roles, FKs and audit history preserved
+- [x] Existing user accounts link automatically by verified e-mail — ids, roles, FKs and audit history preserved
+- [x] Administrator rows are **never** linked by a web sign-in (takeover guard); the operator links them with `database/link-clerk.php`, which requires a Clerk-verified address that matches the row
 - [x] No duplicate rows: unique index + transactional upsert + explicit conflict handling
 
 **Authorization**
@@ -105,11 +106,11 @@ now live entirely in Clerk; FreeSub stores only the link to a Clerk user id.
 - [x] `SECURITY_AUDIT.md`: controls, 10 fixed findings, 5 open risks, test evidence
 
 **Tests**
-- [x] 7 new suites (`clerk-config`, `clerk-token`, `clerk-sync`, `clerk-handoff`, `clerk-session`, `clerk-webhook`, `clerk-webhook-effects`) — 141 assertions, plus 2 secret-hygiene assertions added to `security`
+- [x] 8 new suites (`clerk-config`, `clerk-token`, `clerk-sync`, `clerk-privilege`, `clerk-handoff`, `clerk-session`, `clerk-webhook`, `clerk-webhook-effects`) — 161 assertions
 - [x] Registration, login, logout, invalid/legacy session, expired token, unauthorized dashboard/admin, existing-admin migration, duplicate sync, relationship preservation
 - [x] Real RS256 signatures via a committed test-only key pair; Backend API stubbed at the transport seam
-- [x] `tests/http-clerk.sh`: 58 end-to-end HTTP checks against the real endpoints
-- [x] 266 assertions total, all green
+- [x] `tests/http-clerk.sh`: 61 end-to-end HTTP checks against the real endpoints
+- [x] 287 assertions total, all green
 
 ### Known limitations
 
@@ -119,11 +120,13 @@ now live entirely in Clerk; FreeSub stores only the link to a Clerk user id.
 
 ### Defects found and fixed during this delivery
 
-Session fingerprint was not enforced on resolution; the bridge read `$_POST`
-while the client posts JSON; `Auth::loginBreakGlass()` accepted no proof of CLI
+An administrator row could be inherited by a web sign-in (Critical); session
+fingerprint was not enforced on resolution; the bridge read `$_POST` while the
+client posts JSON; the Clerk SDK URL was never resolvable; `config()` mutated its
+own cache so overrides leaked; `Auth::loginBreakGlass()` accepted no proof of CLI
 authorisation; break-glass links could not be redeemed; the signing-key cache
-ignored the instance; the schema splitter swallowed tables preceded by a
-comment. Details and regression tests are in
+ignored the instance; a JWKS outage was reported as a 401; the schema splitter
+swallowed tables preceded by a comment. Details and regression tests are in
 [`SECURITY_AUDIT.md` §4](SECURITY_AUDIT.md#4-findings-fixed-during-this-audit).
 
 ---

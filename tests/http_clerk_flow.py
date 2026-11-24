@@ -226,11 +226,57 @@ check("identity unlinked", row is not None and row[2] is None, row)
 
 print("Existing administrators")
 # A pre-migration administrator: the row exists with the admin role and no Clerk
-# identity. The handoff must attach the identity, never recreate the account.
+# identity. Browsing to it and signing in must NOT attach the identity (that
+# would let anyone who controls the address take the admin account over); the
+# operator links it deliberately from the CLI, exactly as the README says.
 connection = db()
 connection.execute(
     "UPDATE users SET role = 'admin', status = 'active', clerk_user_id = NULL WHERE email = ?",
     ("legacy-admin@clerk-test.local",),
+)
+connection.commit()
+
+admin_id = connection.execute(
+    "SELECT id FROM users WHERE email = ?", ("legacy-admin@clerk-test.local",)
+).fetchone()[0]
+connection.close()
+
+attempt = requests.Session()
+page = attempt.get(f"{BASE}/login.php")
+cfg_attempt = config(page)
+refused = attempt.post(
+    f"{BASE}/clerk-bridge.php",
+    json={"handoffToken": token("user_2legacy"), "channel": cfg_attempt["channel"],
+          "state": cfg_attempt["state"]},
+    headers={"Origin": BASE, "Content-Type": "application/json"},
+)
+check("an admin row cannot be claimed by signing in", refused.status_code in (401, 409),
+      (refused.status_code, refused.text[:160]))
+
+connection = db()
+still_free = connection.execute(
+    "SELECT role, clerk_user_id FROM users WHERE id = ?", (admin_id,)
+).fetchone()
+connection.close()
+check("the admin row is unchanged by the attempt",
+      still_free is not None and still_free[0] == "admin" and still_free[1] is None,
+      still_free)
+
+linked = subprocess.run(
+    [os.environ.get("PHP_BIN", "php"), os.path.join(ROOT, "database", "link-clerk.php"),
+     "--email=legacy-admin@clerk-test.local", "--clerk-id=user_2legacy"],
+    capture_output=True, text=True,
+)
+cli_output = (linked.stdout + linked.stderr).strip()
+check("the CLI refuses an address it cannot verify against Clerk",
+      "Clerk lookup" in cli_output or "Verified" in cli_output or "verified" in cli_output,
+      cli_output[:200])
+
+# Equivalently, and reachable without Clerk: attach the already-verified id the
+# way database/link-clerk.php would after confirming the address.
+connection = db()
+connection.execute(
+    "UPDATE users SET clerk_user_id = 'user_2legacy' WHERE id = ?", (admin_id,)
 )
 connection.commit()
 connection.close()
@@ -244,7 +290,8 @@ bridge = admin.post(
     json={"handoffToken": token("user_2legacy"), "channel": cfg["channel"], "state": cfg["state"]},
     headers={"Origin": BASE, "Content-Type": "application/json"},
 )
-check("administrator can complete the handoff", bridge.status_code == 200, bridge.status_code)
+check("administrator can complete the handoff once linked", bridge.status_code == 200,
+      (bridge.status_code, bridge.text[:120]))
 admin.post(f"{BASE}/auth/handoff.php",
            data={"handoff_token": bridge.json().get("token", ""), "_token": form_token}, allow_redirects=False)
 check("administrator reaches the admin area", admin.get(f"{BASE}/admin/index.php").status_code == 200)

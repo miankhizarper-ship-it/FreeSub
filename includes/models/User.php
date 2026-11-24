@@ -86,11 +86,13 @@ final class User
      * to somebody else's existing account.
      *
      * @param array<string, mixed> $clerkUser Raw Clerk user object
+     * @param bool $force CLI only: allow attaching an administrator row. Never
+     *                    pass true from a request handler.
      * @return array{user: array<string, mixed>, created: bool, linked: bool}
      *
      * @throws ClerkSyncException when the identity cannot be resolved safely
      */
-    public static function syncFromClerk(array $clerkUser): array
+    public static function syncFromClerk(array $clerkUser, bool $force = false): array
     {
         $clerkUserId = (string) ($clerkUser['id'] ?? '');
 
@@ -128,6 +130,21 @@ final class User
                     // than merge: an administrator has to resolve this.
                     throw new ClerkSyncException(
                         'This email address is already linked to a different sign-in account. Please contact support.',
+                        409
+                    );
+                }
+
+                // A self-service sign-in must never inherit an administrator
+                // account from an email claim. Verifying control of an address
+                // is not proof of being the person who ran the platform: an
+                // admin's address can be recycled, re-registered after a lapse,
+                // or added to a second Clerk user by mistake. Admin rows are
+                // linked deliberately, from the CLI, by someone with shell
+                // access to this installation.
+                if ((string) ($candidate['role'] ?? 'user') === 'admin' && empty($force)) {
+                    throw new ClerkSyncException(
+                        'This account is managed offline. An administrator must link it from the server '
+                        . '(php database/link-clerk.php).',
                         409
                     );
                 }

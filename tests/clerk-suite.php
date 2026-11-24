@@ -222,6 +222,71 @@ if (run_suite($only, 'clerk-token')) {
     $result = ClerkTokenVerifier::verify($harness->token(['sub' => '../../etc/passwd']), $issuer);
     $t->check('malformed subject rejected', !$result->valid && $result->reason === ClerkTokenVerifier::REASON_MISSING_SUBJECT, $result->reason);
 
+    // Audience: only enforced when CLERK_AUDIENCES is configured, because the
+    // handoff template does not set one by default.
+    $t->check('audience is not enforced when unconfigured', (static function () use ($harness, $issuer): bool {
+        $saved = $GLOBALS['FREESUB_CONFIG_OVERRIDE'];
+        $GLOBALS['FREESUB_CONFIG_OVERRIDE'] = array_replace_recursive($saved, ['clerk' => ['audiences' => []]]);
+        $result = ClerkTokenVerifier::verify($harness->token(['aud' => 'anything']), $issuer);
+        $GLOBALS['FREESUB_CONFIG_OVERRIDE'] = $saved;
+
+        return $result->valid === true;
+    })());
+
+    $t->check('wrong audience rejected when configured', (static function () use ($harness, $issuer): bool {
+        $saved = $GLOBALS['FREESUB_CONFIG_OVERRIDE'];
+        $GLOBALS['FREESUB_CONFIG_OVERRIDE'] = array_replace_recursive($saved, ['clerk' => ['audiences' => ['freesub']]]);
+        $result = ClerkTokenVerifier::verify($harness->token(['aud' => 'somebody-else']), $issuer);
+        $GLOBALS['FREESUB_CONFIG_OVERRIDE'] = $saved;
+
+        return !$result->valid && $result->reason === ClerkTokenVerifier::REASON_BAD_AUDIENCE;
+    })());
+
+    $t->check('matching audience accepted', (static function () use ($harness, $issuer): bool {
+        $saved = $GLOBALS['FREESUB_CONFIG_OVERRIDE'];
+        $GLOBALS['FREESUB_CONFIG_OVERRIDE'] = array_replace_recursive($saved, ['clerk' => ['audiences' => ['freesub']]]);
+        $result = ClerkTokenVerifier::verify($harness->token(['aud' => 'freesub']), $issuer);
+        $GLOBALS['FREESUB_CONFIG_OVERRIDE'] = $saved;
+
+        return $result->valid === true;
+    })());
+
+    $t->check('array audience accepted', (static function () use ($harness, $issuer): bool {
+        $saved = $GLOBALS['FREESUB_CONFIG_OVERRIDE'];
+        $GLOBALS['FREESUB_CONFIG_OVERRIDE'] = array_replace_recursive($saved, ['clerk' => ['audiences' => ['freesub']]]);
+        $result = ClerkTokenVerifier::verify($harness->token(['aud' => ['other', 'freesub']]), $issuer);
+        $GLOBALS['FREESUB_CONFIG_OVERRIDE'] = $saved;
+
+        return $result->valid === true;
+    })());
+
+    $t->check('missing audience rejected when configured', (static function () use ($harness, $issuer): bool {
+        $saved = $GLOBALS['FREESUB_CONFIG_OVERRIDE'];
+        $GLOBALS['FREESUB_CONFIG_OVERRIDE'] = array_replace_recursive($saved, ['clerk' => ['audiences' => ['freesub']]]);
+        $result = ClerkTokenVerifier::verify($harness->token(['aud' => null]), $issuer);
+        $GLOBALS['FREESUB_CONFIG_OVERRIDE'] = $saved;
+
+        return !$result->valid && $result->reason === ClerkTokenVerifier::REASON_BAD_AUDIENCE;
+    })());
+
+    // JWKS unavailable must be a distinct reason so the bridge can answer 503
+    // rather than pretending the user's token was bad.
+    $t->check('unreachable JWKS is reported as key-unavailable', (static function () use ($harness, $issuer): bool {
+        $saved = ClerkTokenVerifier::class;
+        ClerkTokenVerifier::setJwksLoader(static function (): array {
+            throw new RuntimeException('JWKS request failed');
+        });
+
+        $result = ClerkTokenVerifier::verify(
+            $harness->token(),
+            $issuer,
+            'https://unreachable.test/' . bin2hex(random_bytes(4)) . '/jwks.json'
+        );
+        $harness->installVerifier();
+
+        return !$result->valid && $result->reason === ClerkTokenVerifier::REASON_KEY_UNAVAILABLE;
+    })());
+
     // Structure
     $t->check('empty token rejected', ClerkTokenVerifier::verify('', $issuer)->reason === ClerkTokenVerifier::REASON_MISSING);
     $t->check('non-JWT rejected', ClerkTokenVerifier::verify('not-a-token', $issuer)->reason === ClerkTokenVerifier::REASON_MALFORMED);
@@ -316,7 +381,20 @@ if (run_suite($only, 'clerk-sync')) {
     $t->check('legacy admin has no Clerk id yet', clerk_test_user_id('user_2legacy') === null);
 
     $legacyClerk = $harness->addUser('user_2legacy', 'legacy-admin@clerk-test.local', 'Legacy', 'Admin');
-    $migrated = User::syncFromClerk($legacyClerk);
+
+    // A self-service sign-in must NOT inherit an administrator row, even with a
+    // verified address (see SECURITY_AUDIT F12).
+    $t->throws('an administrator row is never claimed by a web sign-in', static function () use ($legacyClerk): void {
+        User::syncFromClerk($legacyClerk);
+    });
+
+    $t->check('the administrator row is untouched by the attempt', (int) Database::scalar(
+        'SELECT COUNT(*) FROM users WHERE id = :id AND clerk_user_id IS NULL AND role = :role',
+        ['id' => $legacyId, 'role' => 'admin']
+    ) === 1);
+
+    // The deliberate, CLI-only path.
+    $migrated = User::syncFromClerk($legacyClerk, true);
 
     $t->check('existing account is linked, not recreated', $migrated['created'] === false && $migrated['linked'] === true);
     $t->check('internal id preserved across migration', (int) $migrated['user']['id'] === $legacyId, [$migrated['user']['id'], $legacyId]);
@@ -822,4 +900,77 @@ if (run_suite($only, 'clerk-webhook-effects')) {
         $t->check('malformed session id refused', Auth::endClerkSession('bad id!') === false);
         $t->check('unknown Clerk user cannot mirror a session', Auth::mirrorClerkSession('user_2nobody', 'sess_user_2nobody') === false);
     }
+}
+
+if (run_suite($only, 'clerk-privilege')) {
+    $t->suite('Clerk privilege escalation');
+
+    $harness = $clerkHarness;
+    $harness->installVerifier();
+    $harness->installApiClient();
+
+    $email = 'target-admin@clerk-test.local';
+    Database::execute('DELETE FROM users WHERE email = :e', ['e' => $email]);
+
+    Database::execute(
+        "INSERT INTO users (name, email, password_hash, role, status, created_at, updated_at)
+         VALUES ('Target Admin', :e, :hash, 'admin', 'active', :now, :now)",
+        ['e' => $email, 'hash' => Auth::hashPassword('TargetPass1234'), 'now' => now()]
+    );
+
+    $adminId = (int) Database::lastInsertId();
+
+    // The attacker controls a brand-new Clerk account that has verified the
+    // administrator's address (recycled address, re-registration, or a second
+    // Clerk user added to the same mailbox).
+    $harness->addUser('user_2takeover', $email, 'Mallory', 'Attacker');
+
+    $t->throws('a verified email alone cannot claim an admin account', static function () use ($harness): void {
+        User::syncFromClerk($harness->users['user_2takeover']);
+    });
+
+    $t->check('admin row keeps its role', (string) User::find($adminId)['role'] === 'admin');
+    $t->check('admin row stays unlinked', User::find($adminId)['clerk_user_id'] === null);
+    $t->check('attacker gets no account of their own', User::findByClerkId('user_2takeover') === null);
+
+    // The same attempt through the real handoff path (what the bridge calls).
+    clerk_test_reset_session();
+    ClerkHandoff::openChannel();
+    $handoff = ClerkHandoff::completeFromBrowserToken(
+        $harness->token(['sub' => 'user_2takeover']),
+        'http://localhost'
+    );
+
+    $t->check('the handoff endpoint refuses the takeover', $handoff['ok'] === false, $handoff['reason'] ?? null);
+    $t->check('the refusal issues no ticket', !isset($handoff['token']));
+    $t->check('the refusal does not reveal the admin address', !str_contains(
+        (string) ($handoff['message'] ?? ''),
+        $email
+    ));
+
+    // --- A non-admin row must still link automatically --------------------
+    $userEmail = 'target-user@clerk-test.local';
+    Database::execute('DELETE FROM users WHERE email = :e', ['e' => $userEmail]);
+    Database::execute(
+        "INSERT INTO users (name, email, password_hash, role, status, created_at, updated_at)
+         VALUES ('Target User', :e, :hash, 'user', 'active', :now, :now)",
+        ['e' => $userEmail, 'hash' => Auth::hashPassword('TargetPass1234'), 'now' => now()]
+    );
+
+    $userId = (int) Database::lastInsertId();
+    $harness->addUser('user_2normallink', $userEmail, 'Normal', 'User');
+    $linked = User::syncFromClerk($harness->users['user_2normallink']);
+
+    $t->check('a normal account still links automatically', $linked['linked'] === true);
+    $t->check('the normal account keeps its id', (int) $linked['user']['id'] === $userId);
+    $t->check('the normal account keeps the user role', $linked['user']['role'] === 'user');
+
+    // --- The CLI path still works, and is the only one --------------------
+    Database::execute('UPDATE users SET clerk_user_id = NULL WHERE id = :id', ['id' => $userId]);
+    $forced = User::syncFromClerk($harness->users['user_2takeover'], true);
+
+    $t->check('the CLI force path can link an admin row', (int) $forced['user']['id'] === $adminId);
+    $t->check('the CLI path does not change the role', $forced['user']['role'] === 'admin');
+
+    Database::execute('UPDATE users SET clerk_user_id = NULL WHERE id = :id', ['id' => $adminId]);
 }

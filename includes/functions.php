@@ -25,15 +25,20 @@ if (!function_exists('config')) {
             $config = require FREESUB_ROOT . '/config/app.php';
         }
 
+        // Merge into a *copy*. Merging into $config would mutate the cache, so an
+        // override could never be withdrawn and would leak into every later call
+        // in the same process.
+        $resolved = $config;
+
         if (isset($GLOBALS['FREESUB_CONFIG_OVERRIDE']) && is_array($GLOBALS['FREESUB_CONFIG_OVERRIDE'])) {
-            $config = array_replace_recursive($config, $GLOBALS['FREESUB_CONFIG_OVERRIDE']);
+            $resolved = array_replace_recursive($resolved, $GLOBALS['FREESUB_CONFIG_OVERRIDE']);
         }
 
         if ($key === null || $key === '') {
-            return $config;
+            return $resolved;
         }
 
-        $value = $config;
+        $value = $resolved;
 
         foreach (explode('.', $key) as $segment) {
             if (!is_array($value) || !array_key_exists($segment, $value)) {

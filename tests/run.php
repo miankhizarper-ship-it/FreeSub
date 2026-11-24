@@ -287,6 +287,31 @@ if (run_suite($only, 'security')) {
         json_encode(ClerkConfig::publicConfiguration()) ?: '',
         'sk_test'
     ));
+    // The override seam must not mutate config()'s cache: a merged-in value that
+    // cannot be withdrawn silently changes behaviour for the rest of the process.
+    $t->check('config overrides are reversible', (static function (): bool {
+        $key = 'clerk.audiences';
+        $before = config($key);
+
+        $GLOBALS['FREESUB_CONFIG_OVERRIDE'] = array_replace_recursive(
+            $GLOBALS['FREESUB_CONFIG_OVERRIDE'] ?? [],
+            ['clerk' => ['audiences' => ['override-probe']]]
+        );
+
+        $during = config($key);
+
+        unset($GLOBALS['FREESUB_CONFIG_OVERRIDE']);
+        $after = config($key);
+
+        $restored = $GLOBALS['FREESUB_CONFIG_OVERRIDE'] ?? null;
+
+        if ($restored !== null) {
+            $GLOBALS['FREESUB_CONFIG_OVERRIDE'] = $restored;
+        }
+
+        return $during === ['override-probe'] && $after === $before;
+    })());
+
     $t->check('clerk diagnostics expose status, not values', (static function (): bool {
         $json = json_encode(ClerkConfig::diagnostics()) ?: '';
 
@@ -350,7 +375,7 @@ if (run_suite($only, 'auth')) {
 /* -------------------------------------------------------------------------
  * 3b. Clerk authentication
  * ---------------------------------------------------------------------- */
-foreach (['clerk-config', 'clerk-token', 'clerk-sync', 'clerk-handoff', 'clerk-session', 'clerk-webhook', 'clerk-webhook-effects'] as $clerkSuite) {
+foreach (['clerk-config', 'clerk-token', 'clerk-sync', 'clerk-handoff', 'clerk-session', 'clerk-webhook', 'clerk-webhook-effects', 'clerk-privilege'] as $clerkSuite) {
     if (run_suite($only, $clerkSuite)) {
         require __DIR__ . '/clerk-suite.php';
         break;

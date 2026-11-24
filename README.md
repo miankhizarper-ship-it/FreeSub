@@ -352,12 +352,27 @@ identity into a local row, and it always runs inside a transaction:
 
 1. **Already linked** (`clerk_user_id` matches) → refresh name, avatar, verified
    email; never create a row.
-2. **Existing local account with the same *verified* email** → attach the Clerk
-   id to that row. This is how pre-Clerk accounts (including every administrator)
-   migrate without losing their id, reservations or audit history. An unverified
-   address can never claim an existing account, and an address already linked to
-   a different Clerk user produces a clear error instead of a merge.
+2. **Existing local account with the same *verified* email, `role = 'user'`** →
+   attach the Clerk id to that row. An unverified address can never claim an
+   existing account, and an address already linked to a different Clerk user
+   produces a clear error instead of a merge.
 3. **Otherwise** → provision a new account with `role = 'user'`.
+
+**Administrator rows never link from a web sign-in.** Verifying an email address
+proves control of a mailbox, not that the person is the operator who ran the
+platform — addresses get recycled, re-registered after a lapse, or attached to a
+second Clerk user by mistake. If step 2 would attach an `admin` row, the sign-in
+is refused and the operator links it deliberately from the shell:
+
+```bash
+php database/link-clerk.php --email=admin@example.com --clerk-email=admin@example.com
+```
+
+That command requires Clerk to report the address as **verified**, refuses when
+it does not match the local row, and never changes the role. Until it has run,
+an administrator whose row predates Clerk cannot sign in — which is the intended
+trade-off, and why `php database/link-clerk.php --unlinked` belongs in your
+migration checklist.
 
 Roles are written only as PHP literals. `users.role` is never updated from
 Clerk metadata, a token claim or a form field.
@@ -402,6 +417,9 @@ php database/clerk-check.php        # configuration sanity, exit 0 = usable
 php database/link-clerk.php --list  # who is linked to which Clerk user
 ```
 
+Then link each administrator once (see [Account reconciliation](#account-reconciliation));
+their dashboards stay closed to web sign-ins until you do.
+
 The migration adds `clerk_user_id` (unique), `username`, `avatar_url`,
 `auth_provider`, makes `password_hash` nullable, and creates `clerk_handoffs` and
 `clerk_sessions`. On SQLite the `password_hash` change needs a table rebuild; it
@@ -438,7 +456,10 @@ To verify for real, on a machine that can reach Clerk:
    * sign in with Google using the same address → the same row again;
    * sign out, then open `/dashboard.php` directly → redirected to `/login.php`;
    * sign in as a normal user, then open `/admin/index.php` → denied;
-   * sign in as an existing administrator → the admin area still works;
+   * sign in as an existing administrator **before** linking → refused with
+     "managed offline" (this is the takeover guard, not a fault);
+   * run `php database/link-clerk.php --email=… --clerk-email=…`, then sign in
+     again → the admin area works and the role is unchanged;
    * `php database/link-clerk.php --list` shows the links;
    * optional: add the webhook endpoint in the dashboard
      (`https://your.domain/clerk/webhook.php`, events `user.*`, `session.*`),
@@ -508,8 +529,9 @@ Suites:
 | `security` | escaping, CSRF, validation, rate limiting, blocked paths |
 | `auth` | local account helpers, hashing, suspended accounts |
 | `clerk-config` | publishable-key decoding, issuer/JWKS/authorized-party derivation, diagnostics never leak the secret |
-| `clerk-token` | real RS256 **verification**: signature, tampering, foreign key, `alg` downgrade, expiry, `nbf`, wrong/missing `iss`, wrong `azp`, unknown `kid`, JWK→PEM, key rotation |
+| `clerk-token` | real RS256 **verification**: signature, tampering, foreign key, `alg` downgrade, expiry, `nbf`, wrong/missing `iss`, wrong `azp`, `aud`, unknown `kid`, unreachable JWKS, JWK→PEM, key rotation |
 | `clerk-sync` | first sign-in, duplicate sync, legacy-administrator migration, FK preservation, unverified-email hijack, banned users, metadata never grants admin |
+| `clerk-privilege` | account-takeover attempts: an admin row cannot be inherited by a web sign-in; normal linking and the CLI path still work |
 | `clerk-handoff` | channel/state binding, single-use tickets, replay, expiry, origin enforcement, Clerk outage, break-glass tickets |
 | `clerk-session` | session binding, invalid/legacy sessions, fingerprint mismatch, suspension, logout, admin retention |
 | `clerk-webhook` | svix HMAC verification, tampering, replay window, key rotation |
@@ -519,7 +541,7 @@ Suites:
 | `views` | every view/link/redirect target exists |
 | `http` | HTTP journeys (needs a running server) |
 
-Current status: **266 assertions green** on PHP 8.5 with SQLite, plus **58 end-to-end HTTP checks** in `tests/http-clerk.sh`. The MySQL schema in `database/schema.sql` was validated against a real MariaDB 13.1 engine (import, generated column, FKs, cascades, idempotent re-run).
+Current status: **287 assertions green** on PHP 8.5 with SQLite, plus **61 end-to-end HTTP checks** in `tests/http-clerk.sh`. The MySQL schema in `database/schema.sql` was validated against a real MariaDB 13.1 engine (import, generated column, FKs, cascades, idempotent re-run).
 
 The tests use a throwaway database file (`storage/test-<pid>.sqlite`) and delete it afterwards. They never touch production data.
 
@@ -561,6 +583,7 @@ Tracked in [`TASKS.md`](TASKS.md). Highlights:
 | "This email address is already linked to a different sign-in account" | Two Clerk identities claim one verified address. Resolve it with `php database/link-clerk.php --list`, then fix the duplicate in the Clerk dashboard |
 | Webhook returns `503 not_configured` | `CLERK_WEBHOOK_SECRET` is empty. Copy the `whsec_…` value from the webhook endpoint in the dashboard |
 | Webhook returns `401 invalid_signature` | The secret does not belong to that endpoint, the request was replayed (>5 min), or a proxy rewrote the body. Check `storage/logs/php-error.log` for the reason |
+| "This account is managed offline" when signing in as an administrator | Expected: admin rows are never claimed by a web sign-in. Run `php database/link-clerk.php --email=… --clerk-email=…` from the server |
 | Administrator lost access after the migration | The Clerk e-mail must be **verified** and must match the row exactly. Check `php database/link-clerk.php --unlinked`, then use `php database/break-glass.php` if needed |
 
 ---
