@@ -1,0 +1,27 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="630" viewBox="0 0 1200 630" role="img" aria-label="FreeSub — free subdomains">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#eef2ff"/>
+      <stop offset="1" stop-color="#ecfeff"/>
+    </linearGradient>
+    <linearGradient id="brand" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#4f46e5"/>
+      <stop offset="1" stop-color="#0ea5a4"/>
+    </linearGradient>
+  </defs>
+  <rect width="1200" height="630" fill="url(#bg)"/>
+  <circle cx="1050" cy="90" r="230" fill="#4f46e5" opacity="0.08"/>
+  <circle cx="130" cy="560" r="190" fill="#0ea5a4" opacity="0.10"/>
+  <g transform="translate(90, 210)">
+    <rect width="72" height="72" rx="20" fill="url(#brand)"/>
+    <g fill="none" stroke="#fff" stroke-width="4" stroke-linecap="round">
+      <circle cx="36" cy="36" r="18"/>
+      <path d="M18 36h36"/>
+      <ellipse cx="36" cy="36" rx="8.4" ry="18"/>
+    </g>
+  </g>
+  <text x="185" y="258" font-family="'Plus Jakarta Sans', system-ui, sans-serif" font-size="52" font-weight="800" fill="#0b1020">FreeSub</text>
+  <text x="90" y="380" font-family="'Plus Jakarta Sans', system-ui, sans-serif" font-size="66" font-weight="800" fill="#0b1020">Your idea deserves</text>
+  <text x="90" y="455" font-family="'Plus Jakarta Sans', system-ui, sans-serif" font-size="66" font-weight="800" fill="#4f46e5">a real name.</text>
+  <text x="90" y="515" font-family="'Plus Jakarta Sans', system-ui, sans-serif" font-size="27" font-weight="500" fill="#475569">Free subdomains on kharcha.info — no credit card, no hosting lock-in.</text>
+</svg>

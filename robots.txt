@@ -1,0 +1,11 @@
+# FreeSub — keep private areas out of search engines.
+User-agent: *
+Allow: /
+Disallow: /dashboard.php
+Disallow: /admin/
+Disallow: /api/
+Disallow: /login.php
+Disallow: /logout.php
+Disallow: /abuse.php
+
+Sitemap: /sitemap.xml

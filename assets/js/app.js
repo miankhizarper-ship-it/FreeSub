@@ -1,0 +1,322 @@
+/* ==========================================================================
+   FreeSub — front-end behaviour (vanilla JS, no build step)
+   - Lucide icon hydration
+   - Sticky header state + scroll reveal
+   - Live subdomain availability search (debounced, aborts stale requests)
+   - Password visibility toggle + strength meter
+   - Confirm dialogs marked with data-confirm
+   ========================================================================== */
+(function () {
+    'use strict';
+
+    var doc = document;
+    var reduceMotion = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+
+    /* ---------------------------- Icons --------------------------------- */
+    function renderIcons(root) {
+        if (!window.lucide || typeof window.lucide.createIcons !== 'function') {
+            return;
+        }
+
+        window.lucide.createIcons({
+            attrs: { 'stroke-width': 1.8, 'aria-hidden': 'true' },
+            root: root || doc
+        });
+    }
+
+    /* ---------------------------- Header -------------------------------- */
+    function initHeader() {
+        var header = doc.querySelector('[data-site-header]');
+
+        if (!header) {
+            return;
+        }
+
+        var update = function () {
+            header.classList.toggle('is-scrolled', window.scrollY > 8);
+        };
+
+        update();
+        window.addEventListener('scroll', update, { passive: true });
+    }
+
+    /* ---------------------------- Reveal -------------------------------- */
+    function initReveal() {
+        var elements = doc.querySelectorAll('.reveal');
+
+        if (!elements.length || reduceMotion || !('IntersectionObserver' in window)) {
+            elements.forEach(function (el) { el.classList.add('is-visible'); });
+            return;
+        }
+
+        var observer = new IntersectionObserver(function (entries) {
+            entries.forEach(function (entry) {
+                if (entry.isIntersecting) {
+                    entry.target.classList.add('is-visible');
+                    observer.unobserve(entry.target);
+                }
+            });
+        }, { threshold: 0.12, rootMargin: '0px 0px -40px 0px' });
+
+        elements.forEach(function (el) { observer.observe(el); });
+    }
+
+    /* ---------------------------- Search -------------------------------- */
+    function initSearch() {
+        var form = doc.querySelector('[data-subdomain-search]');
+
+        if (!form) {
+            return;
+        }
+
+        var input = form.querySelector('input[name="label"]');
+        var select = form.querySelector('select[name="domain_id"]');
+        var results = doc.querySelector('[data-search-results]');
+        var status = doc.querySelector('[data-search-status]');
+        var endpoint = form.getAttribute('data-endpoint') || 'api/check.php';
+        var timer = null;
+        var controller = null;
+        var lastQuery = '';
+
+        if (!input || !results) {
+            return;
+        }
+
+        function icon(name) {
+            return '<i data-lucide="' + name + '"></i>';
+        }
+
+        function setStatus(message, tone) {
+            if (!status) {
+                return;
+            }
+
+            status.textContent = message || '';
+            status.className = 'search-hint' + (tone ? ' text-' + tone : '');
+        }
+
+        function renderLoading() {
+            results.innerHTML = '<div class="search-result-card is-neutral" role="status">' +
+                '<span class="search-result-icon">' + icon('loader-circle') + '</span>' +
+                '<div class="search-result-body"><div class="search-result-title">Checking availability…</div>' +
+                '<div class="search-result-message">Talking to the registry, one moment.</div></div></div>';
+            renderIcons(results);
+        }
+
+        function renderResult(payload) {
+            var state = payload.status === 'available' ? 'is-available'
+                : (payload.status === 'invalid' || payload.status === 'unavailable' ? 'is-neutral' : 'is-taken');
+            var iconName = payload.status === 'available' ? 'check-circle-2'
+                : (payload.status === 'invalid' ? 'info' : 'x-circle');
+            var fqdn = payload.fqdn || payload.label || '';
+
+            var html = '<div class="search-result-card ' + state + '" role="status" aria-live="polite">' +
+                '<span class="search-result-icon">' + icon(iconName) + '</span>' +
+                '<div class="search-result-body">' +
+                '<div class="search-result-title">' + escapeHtml(fqdn) + '</div>' +
+                '<div class="search-result-message">' + escapeHtml(payload.message || '') + '</div>';
+
+            if (payload.available && payload.reserve_url) {
+                html += '<div class="mt-2"><a class="btn btn-primary btn-sm" href="' + escapeAttr(payload.reserve_url) + '">' +
+                    'Claim this name ' + icon('arrow-right') + '</a></div>';
+            }
+
+            if (!payload.available && Array.isArray(payload.suggestions) && payload.suggestions.length) {
+                html += '<div class="search-suggestions">';
+                payload.suggestions.forEach(function (suggestion) {
+                    html += '<button type="button" class="chip" data-suggestion="' + escapeAttr(suggestion) + '">' +
+                        icon('sparkles') + escapeHtml(suggestion) + '</button>';
+                });
+                html += '</div>';
+            }
+
+            html += '</div></div>';
+            results.innerHTML = html;
+            renderIcons(results);
+
+            results.querySelectorAll('[data-suggestion]').forEach(function (chip) {
+                chip.addEventListener('click', function () {
+                    input.value = chip.getAttribute('data-suggestion');
+                    input.focus();
+                    run(true);
+                });
+            });
+        }
+
+        function renderError(message) {
+            results.innerHTML = '<div class="search-result-card is-neutral" role="alert">' +
+                '<span class="search-result-icon">' + icon('wifi-off') + '</span>' +
+                '<div class="search-result-body"><div class="search-result-title">Search unavailable</div>' +
+                '<div class="search-result-message">' + escapeHtml(message) + '</div></div></div>';
+            renderIcons(results);
+        }
+
+        function run(immediate) {
+            var label = (input.value || '').trim();
+            var domainId = select ? select.value : '';
+            var query = label + '|' + domainId;
+
+            if (label.length < 1) {
+                results.innerHTML = '';
+                setStatus('Type a name to check availability.');
+                lastQuery = '';
+                return;
+            }
+
+            if (!immediate && query === lastQuery) {
+                return;
+            }
+
+            lastQuery = query;
+
+            if (timer) {
+                window.clearTimeout(timer);
+            }
+
+            timer = window.setTimeout(function () {
+                if (controller) {
+                    controller.abort();
+                }
+
+                controller = ('AbortController' in window) ? new AbortController() : null;
+                renderLoading();
+                setStatus('');
+
+                var url = endpoint + '?label=' + encodeURIComponent(label) + (domainId ? '&domain_id=' + encodeURIComponent(domainId) : '') + '&format=json';
+
+                fetch(url, {
+                    headers: { 'Accept': 'application/json', 'X-Requested-With': 'XMLHttpRequest' },
+                    credentials: 'same-origin',
+                    signal: controller ? controller.signal : undefined
+                })
+                    .then(function (response) {
+                        if (!response.ok) {
+                            throw new Error('The server responded with ' + response.status + '.');
+                        }
+                        return response.json();
+                    })
+                    .then(function (payload) { renderResult(payload); })
+                    .catch(function (error) {
+                        if (error && error.name === 'AbortError') {
+                            return;
+                        }
+                        renderError(error && error.message ? error.message : 'Please try again in a moment.');
+                    });
+            }, immediate ? 0 : 420);
+        }
+
+        input.addEventListener('input', function () { run(false); });
+        if (select) {
+            select.addEventListener('change', function () { run(true); });
+        }
+        form.addEventListener('submit', function (event) {
+            event.preventDefault();
+            run(true);
+        });
+
+        if (input.value.trim() !== '') {
+            run(true);
+        }
+    }
+
+    /* ---------------------------- Password ------------------------------ */
+    function initPasswords() {
+        doc.querySelectorAll('[data-password-toggle]').forEach(function (button) {
+            button.addEventListener('click', function () {
+                var target = doc.getElementById(button.getAttribute('data-password-toggle'));
+
+                if (!target) {
+                    return;
+                }
+
+                var show = target.type === 'password';
+                target.type = show ? 'text' : 'password';
+                button.setAttribute('aria-label', show ? 'Hide password' : 'Show password');
+                button.innerHTML = '<i data-lucide="' + (show ? 'eye-off' : 'eye') + '"></i>';
+                renderIcons(button);
+            });
+        });
+
+        doc.querySelectorAll('[data-password-strength]').forEach(function (input) {
+            var meter = doc.querySelector('[data-password-meter="' + input.id + '"]');
+            var hint = doc.querySelector('[data-password-hint="' + input.id + '"]');
+
+            if (!meter) {
+                return;
+            }
+
+            var score = function (value) {
+                var points = 0;
+                if (value.length >= 10) points++;
+                if (value.length >= 14) points++;
+                if (/[a-z]/.test(value) && /[A-Z]/.test(value)) points++;
+                if (/\d/.test(value)) points++;
+                if (/[^A-Za-z0-9]/.test(value)) points++;
+                return Math.min(4, points);
+            };
+
+            var labels = ['Too short', 'Weak', 'Okay', 'Good', 'Strong'];
+
+            var update = function () {
+                var value = input.value || '';
+                var value2 = score(value);
+                meter.setAttribute('data-score', value === '' ? '0' : String(value2));
+
+                if (hint) {
+                    hint.textContent = value === '' ? 'At least 10 characters, with a letter and a number.' : labels[value2] + ' password';
+                }
+            };
+
+            input.addEventListener('input', update);
+            update();
+        });
+    }
+
+    /* ---------------------------- Confirm ------------------------------- */
+    function initConfirms() {
+        doc.addEventListener('click', function (event) {
+            var target = event.target.closest('[data-confirm]');
+
+            if (!target) {
+                return;
+            }
+
+            var message = target.getAttribute('data-confirm') || 'Are you sure?';
+
+            if (!window.confirm(message)) {
+                event.preventDefault();
+                event.stopImmediatePropagation();
+            }
+        }, true);
+    }
+
+    /* ---------------------------- Helpers ------------------------------- */
+    function escapeHtml(value) {
+        return String(value == null ? '' : value)
+            .replace(/&/g, '&amp;')
+            .replace(/</g, '&lt;')
+            .replace(/>/g, '&gt;')
+            .replace(/"/g, '&quot;')
+            .replace(/'/g, '&#39;');
+    }
+
+    function escapeAttr(value) {
+        return escapeHtml(value).replace(/`/g, '&#96;');
+    }
+
+    /* ---------------------------- Boot ---------------------------------- */
+    function boot() {
+        renderIcons();
+        initHeader();
+        initReveal();
+        initSearch();
+        initPasswords();
+        initConfirms();
+    }
+
+    if (doc.readyState === 'loading') {
+        doc.addEventListener('DOMContentLoaded', boot);
+    } else {
+        boot();
+    }
+})();

@@ -1,0 +1,31 @@
+# Environment & secrets
+.env
+.env.*
+!.env.example
+
+# Runtime state (never commit user data or logs)
+storage/logs/*
+!storage/logs/.gitkeep
+!storage/logs/.htaccess
+storage/cache/*
+!storage/cache/.gitkeep
+!storage/cache/.htaccess
+storage/sessions/*
+!storage/sessions/.gitkeep
+!storage/sessions/.htaccess
+storage/*.sqlite
+storage/*.sqlite-*
+
+# Dependencies (this project ships no Composer or npm packages)
+/vendor/
+/node_modules/
+
+# OS / editor noise
+.DS_Store
+Thumbs.db
+*.swp
+.idea/
+.vscode/
+
+# Local test scratch
+/tests/tmp/
