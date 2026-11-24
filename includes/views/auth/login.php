@@ -1,7 +1,14 @@
 <?php
 /**
+ * Sign in view. All credential handling happens inside Clerk's component.
+ *
  * @var array<string, string> $errors
- * @var array<string, string> $values
+ * @var bool   $clerkReady
+ * @var bool   $secretReady
+ * @var string $channel
+ * @var string $state
+ * @var string $clerkPublishableKey
+ * @var string|null $notice
  */
 ?>
 <section class="auth-wrap">
@@ -18,47 +25,17 @@
 
                 <?php partial('partials/flashes'); ?>
 
-                <?php if (isset($errors['email']) && !isset($errors['_fieldless'])): ?>
-                    <div class="alert alert-danger" role="alert">
-                        <i data-lucide="circle-alert" aria-hidden="true"></i>
-                        <div><?= e($errors['email']) ?></div>
-                    </div>
-                <?php endif; ?>
-
-                <form method="post" action="<?= e(app_url('/login.php')) ?>" novalidate>
-                    <?= csrf_field() ?>
-
-                    <div class="mb-3">
-                        <label class="form-label" for="email">Email address</label>
-                        <input type="email" class="form-control<?= isset($errors['email']) ? ' is-invalid' : '' ?>"
-                               id="email" name="email" value="<?= e($values['email'] ?? '') ?>"
-                               autocomplete="username" required maxlength="190" autofocus>
-                        <?php if (isset($errors['email'])): ?>
-                            <div class="invalid-feedback"><?= e($errors['email']) ?></div>
-                        <?php endif; ?>
-                    </div>
-
-                    <div class="mb-3">
-                        <div class="d-flex justify-content-between align-items-center">
-                            <label class="form-label mb-0" for="password">Password</label>
-                            <span class="form-text">Forgot it? <a href="mailto:<?= e((string) config('contact.support', 'support@kharcha.info')) ?>">Contact support</a></span>
-                        </div>
-                        <div class="position-relative mt-2">
-                            <input type="password" class="form-control<?= isset($errors['password']) ? ' is-invalid' : '' ?>"
-                                   id="password" name="password" autocomplete="current-password" required>
-                            <?php if (isset($errors['password'])): ?>
-                                <div class="invalid-feedback"><?= e($errors['password']) ?></div>
-                            <?php endif; ?>
-                            <button type="button" class="password-toggle" data-password-toggle="password" aria-label="Show password">
-                                <i data-lucide="eye"></i>
-                            </button>
-                        </div>
-                    </div>
-
-                    <button type="submit" class="btn btn-primary w-100 btn-lg mt-2">
-                        Sign in <i data-lucide="arrow-right" aria-hidden="true"></i>
-                    </button>
-                </form>
+                <?php partial('partials/clerk-auth', [
+                    'mode' => 'sign-in',
+                    'clerkReady' => $clerkReady ?? false,
+                    'secretReady' => $secretReady ?? false,
+                    'channel' => $channel ?? '',
+                    'state' => $state ?? '',
+                    'headline' => 'Welcome back',
+                    'notice' => $notice ?? null,
+                    'errors' => $errors ?? [],
+                    'clerkPublishableKey' => $clerkPublishableKey ?? '',
+                ]); ?>
 
                 <p class="text-center mt-4 mb-0 text-muted-2" style="font-size:.92rem">
                     New here? <a href="<?= e(app_url('/register.php')) ?>" class="fw-semibold">Create a free account</a>
@@ -66,7 +43,7 @@
             </div>
 
             <p class="text-center mt-3 mb-0 footer-small" style="color:var(--fs-muted)">
-                Protected by CSRF tokens, rate limiting and hashed credentials.
+                Sign-in is delegated to Clerk — passwords never touch our servers.
             </p>
         </div>
     </div>

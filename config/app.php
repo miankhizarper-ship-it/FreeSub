@@ -68,6 +68,43 @@ return [
         ],
     ],
 
+    'clerk' => [
+        // Clerk publishes the frontend API host inside the publishable key, so a
+        // single value is enough to boot the browser SDK.
+        'publishable_key' => trim((string) env('CLERK_PUBLISHABLE_KEY', '')),
+        // Server-side only. Never rendered, never logged, never in the database.
+        'secret_key' => trim((string) env('CLERK_SECRET_KEY', '')),
+        // Origin allowlist for the `azp` claim. Only our own origins belong here.
+        'authorized_parties' => array_values(array_filter(array_map('trim', explode(
+            ',',
+            (string) env('CLERK_AUTHORIZED_PARTIES', '')
+        )))),
+        'webhook_secret' => trim((string) env('CLERK_WEBHOOK_SECRET', '')),
+        // Space/comma separated Clerk audience values, if the instance sets any.
+        'audiences' => array_values(array_filter(array_map('trim', preg_split(
+            '/[\s,]+/',
+            (string) env('CLERK_AUDIENCES', '')
+        ) ?: []))),
+        // JWT template that the browser mints the handoff token from. Must exist
+        // in the Clerk dashboard (see README) or sign-in reports `template_missing`.
+        // Pinned version of the official browser SDK loaded from the instance's
+        // own frontend API host (no third-party CDN dependency at runtime).
+        'js_version' => (string) env('CLERK_JS_VERSION', '6.46.3'),
+        'jwt_template' => (string) env('CLERK_JWT_TEMPLATE', 'freesub_handoff'),
+        'frontend_api_host' => trim((string) env('CLERK_FRONTEND_API', '')),
+        'backend_api_url' => rtrim((string) env('CLERK_BACKEND_API', 'https://api.clerk.com'), '/'),
+        'jwks_url' => trim((string) env('CLERK_JWKS_URL', '')),
+        'clock_skew' => env_int('CLERK_CLOCK_SKEW', 5),
+        'jwks_cache_ttl' => env_int('CLERK_JWKS_CACHE_TTL', 300),
+        // How long a locally established session is trusted before Clerk is
+        // asked again whether the session is still alive.
+        'session_recheck' => env_int('CLERK_SESSION_RECHECK', 60),
+        'handoff_ttl' => env_int('CLERK_HANDOFF_TTL', 120),
+        'ticket_ttl' => env_int('CLERK_TICKET_TTL', 60),
+        'auto_provision' => env_bool('CLERK_AUTO_PROVISION', true),
+        'break_glass' => env_bool('CLERK_BREAK_GLASS', false),
+    ],
+
     'dns' => [
         // Integration is intentionally not implemented yet; the interface exists
         // so the Cloudflare driver can be dropped in without touching callers.

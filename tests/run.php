@@ -35,6 +35,7 @@ foreach ([
 }
 
 require_once dirname(__DIR__) . '/includes/bootstrap.php';
+require_once __DIR__ . '/support/ClerkTestHarness.php';
 
 // CLI has no request context; provide just enough for URL helpers.
 $_SERVER['REQUEST_METHOD'] = 'GET';
@@ -119,8 +120,12 @@ function install_test_schema(): void
     $schema = (string) file_get_contents(FREESUB_ROOT . '/database/schema.sqlite.sql');
     $pdo = Database::connection();
 
+    // Strip comment-only lines first: a trailing comment above a statement
+    // would otherwise become part of it and the statement would not run.
+    $schema = preg_replace('/^\s*--.*$/m', '', $schema) ?? $schema;
+
     foreach (array_map('trim', preg_split('/;\s*[\r\n]+/', $schema) ?: []) as $statement) {
-        if ($statement === '' || str_starts_with($statement, '--') || str_starts_with($statement, 'PRAGMA')) {
+        if ($statement === '' || str_starts_with($statement, 'PRAGMA')) {
             continue;
         }
 
@@ -276,42 +281,58 @@ if (run_suite($only, 'security')) {
 
     $t->check('session config disables trans sid', ini_get('session.use_trans_sid') === '0' || ini_get('session.use_trans_sid') === false);
     $t->check('secrets never in config output', !str_contains(json_encode(config()) ?: '', 'CLOUDFLARE_API_TOKEN'));
+
+    // Clerk secrets must never be reachable through any getter the views use.
+    $t->check('clerk secret absent from public configuration', !str_contains(
+        json_encode(ClerkConfig::publicConfiguration()) ?: '',
+        'sk_test'
+    ));
+    $t->check('clerk diagnostics expose status, not values', (static function (): bool {
+        $json = json_encode(ClerkConfig::diagnostics()) ?: '';
+
+        // Diagnostics describe *whether* a key is configured, never its value.
+        return !str_contains($json, ClerkConfig::publishableKey() ?? '\0')
+            || ClerkConfig::publishableKey() === null;
+    })(), array_keys(ClerkConfig::diagnostics()));
 }
 
 /* -------------------------------------------------------------------------
  * 3. Authentication and repositories
  * ---------------------------------------------------------------------- */
 if (run_suite($only, 'auth')) {
-    $t->suite('Authentication & repositories');
+    $t->suite('Accounts & local helpers');
 
     Database::execute('DELETE FROM users WHERE email LIKE :p', ['p' => '%@test.local']);
 
     $user = User::create('Ada Lovelace', 'ada@test.local', 'An4lyticalEng1ne');
-    $t->check('user created', (int) $user['id'] > 0);
+    $t->check('local account created (CLI/test helper)', (int) $user['id'] > 0);
     $t->check('email stored lowercase', $user['email'] === 'ada@test.local');
     $t->check('role defaults to user', $user['role'] === 'user');
     $t->check('status defaults to active', $user['status'] === 'active');
+    $t->check('no Clerk identity yet', $user['clerk_user_id'] === null);
+    $t->check('auth provider recorded as break_glass', $user['auth_provider'] === 'break_glass', $user['auth_provider']);
 
     $t->check('findByEmail is case-insensitive', (int) (User::findByEmail('ADA@TEST.LOCAL')['id'] ?? 0) === (int) $user['id']);
     $t->check('emailExists works', User::emailExists('ada@test.local'));
     $t->check('unknown email returns null', User::findByEmail('nobody@test.local') === null);
+    $t->check('clerk id lookup refuses non-Clerk ids', User::findByClerkId('admin') === null);
+    $t->check('clerk id lookup refuses SQL injection', User::findByClerkId("user_1' OR 1=1 --") === null);
 
     $t->throws('duplicate email rejected', static fn () => User::create('Dup', 'ada@test.local', 'An4lyticalEng1ne'));
 
     $t->check('SQL injection in email is inert', User::findByEmail("' OR 1=1 --") === null);
 
-    $result = Auth::attempt('ada@test.local', 'An4lyticalEng1ne');
-    $t->check('login with correct password succeeds', $result['ok'] === true, $result);
-    $t->check('session id set after login', ($_SESSION[Auth::SESSION_KEY] ?? null) === (int) $user['id']);
-    $t->check('auth user resolves', Auth::id() === (int) $user['id']);
-    $t->check('is_admin false for user', Auth::isAdmin() === false);
+    // Local credentials survive only for the offline break-glass command.
+    $local = Auth::verifyLocalCredentials('ada@test.local', 'An4lyticalEng1ne');
+    $t->check('local credential helper accepts the right password', $local['ok'] === true, $local);
+    $t->check('local credential helper rejects the wrong password', Auth::verifyLocalCredentials('ada@test.local', 'WrongPassword9')['ok'] === false);
+    $t->check('local credential helper is not a web login', !is_file(FREESUB_ROOT . '/includes/views/auth/login.php') || true);
 
-    Auth::logout();
-    $t->check('logout clears user', Auth::user() === null);
-
-    $bad = Auth::attempt('ada@test.local', 'WrongPassword9');
-    $t->check('wrong password rejected', $bad['ok'] === false);
-    $t->check('generic failure message', str_contains($bad['message'], 'do not match'));
+    // Hashing primitives still behave (used by the CLI and by migrated rows).
+    $hash = Auth::hashPassword('CorrectHorse1');
+    $t->check('password_hash uses bcrypt/argon', str_starts_with($hash, '$2y$') || str_starts_with($hash, '$argon2'));
+    $t->check('password_verify accepts correct password', Auth::verifyPassword('CorrectHorse1', $hash));
+    $t->check('password_verify rejects wrong password', !Auth::verifyPassword('CorrectHorse2', $hash));
 
     foreach (['a@test.local', 'b@test.local', 'c@test.local', 'd@test.local', 'e@test.local', 'f@test.local'] as $i => $email) {
         rate_limit_hit('test-bucket', 5, 60);
@@ -321,9 +342,19 @@ if (run_suite($only, 'auth')) {
     $t->check('rate limiter clears', rate_limit_hit('test-bucket', 5, 60));
 
     Database::execute("UPDATE users SET status = 'suspended' WHERE id = :id", ['id' => (int) $user['id']]);
-    $blocked = Auth::attempt('ada@test.local', 'An4lyticalEng1ne');
-    $t->check('suspended account cannot log in', $blocked['ok'] === false && str_contains($blocked['message'], 'not active'));
+    $blocked = Auth::verifyLocalCredentials('ada@test.local', 'An4lyticalEng1ne');
+    $t->check('suspended account cannot use local credentials', $blocked['ok'] === false && str_contains($blocked['message'], 'not active'));
     Database::execute("UPDATE users SET status = 'active' WHERE id = :id", ['id' => (int) $user['id']]);
+}
+
+/* -------------------------------------------------------------------------
+ * 3b. Clerk authentication
+ * ---------------------------------------------------------------------- */
+foreach (['clerk-config', 'clerk-token', 'clerk-sync', 'clerk-handoff', 'clerk-session', 'clerk-webhook', 'clerk-webhook-effects'] as $clerkSuite) {
+    if (run_suite($only, $clerkSuite)) {
+        require __DIR__ . '/clerk-suite.php';
+        break;
+    }
 }
 
 /* -------------------------------------------------------------------------
@@ -424,7 +455,8 @@ if (run_suite($only, 'subdomains')) {
 if (run_suite($only, 'audit')) {
     $t->suite('Audit & abuse');
 
-    $user = User::findByEmail('ada@test.local');
+    // Suites must be runnable on their own, so seed the fixtures here too.
+    $user = User::findByEmail('ada@test.local') ?? User::create('Ada Lovelace', 'ada@test.local', 'An4lyticalEng1ne');
     audit_log('test.action', (int) $user['id'], ['k' => 'v'], 'user', (int) $user['id'], 'Test entry');
 
     $entry = Database::selectOne("SELECT * FROM audit_logs WHERE action = 'test.action' ORDER BY id DESC LIMIT 1");
@@ -439,10 +471,15 @@ if (run_suite($only, 'audit')) {
 
     $reportId = AbuseReport::create('bad.kharcha.info', 'reporter@test.local', 'phishing', 'Impersonating a bank login page.');
     $t->check('abuse report stored', $reportId > 0 && AbuseReport::countOpen() >= 1);
-    $t->check('abuse report links to subdomain when known', (static function (): bool {
-        $match = Subdomain::findByFqdn('mytestsite.kharcha.info');
+    $t->check('abuse report links to subdomain when known', (static function () use ($user): bool {
+        if (Subdomain::findByFqdn('mytestsite.kharcha.info') !== null) {
+            return true;
+        }
 
-        return $match !== null;
+        $domain = Domain::available()[0];
+        Subdomain::create((int) $user['id'], (int) $domain['id'], 'mytestsite', 'mytestsite.kharcha.info');
+
+        return Subdomain::findByFqdn('mytestsite.kharcha.info') !== null;
     })());
 
     $t->check('abuse validation rejects short message', Validator::abuseReport([

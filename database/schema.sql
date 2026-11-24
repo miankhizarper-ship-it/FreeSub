@@ -29,7 +29,15 @@ CREATE TABLE IF NOT EXISTS `users` (
     `id` BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
     `name` VARCHAR(100) NOT NULL,
     `email` VARCHAR(190) NOT NULL,
-    `password_hash` VARCHAR(255) NOT NULL,
+    -- Identity now lives in Clerk. The hash column is kept (nullable) so an
+    -- existing installation can migrate without copying password data around:
+    -- it is only consulted by the offline CLI break-glass command.
+    `password_hash` VARCHAR(255) NULL DEFAULT NULL,
+    `clerk_user_id` VARCHAR(191) NULL DEFAULT NULL
+        COMMENT 'Verified Clerk user id (sub). Primary identity key once linked.',
+    `username` VARCHAR(64) NULL DEFAULT NULL COMMENT 'Optional Clerk username',
+    `avatar_url` VARCHAR(500) NULL DEFAULT NULL,
+    `auth_provider` VARCHAR(32) NOT NULL DEFAULT 'clerk' COMMENT 'clerk | break_glass',
     `role` ENUM('user', 'admin') NOT NULL DEFAULT 'user',
     `status` ENUM('active', 'suspended', 'pending') NOT NULL DEFAULT 'active',
     `email_verified_at` DATETIME NULL DEFAULT NULL,
@@ -41,9 +49,56 @@ CREATE TABLE IF NOT EXISTS `users` (
     `updated_at` TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
     PRIMARY KEY (`id`),
     UNIQUE KEY `users_email_unique` (`email`),
+    UNIQUE KEY `users_clerk_user_id_unique` (`clerk_user_id`),
     KEY `users_status_index` (`status`),
     KEY `users_role_index` (`role`),
     KEY `users_created_at_index` (`created_at`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+-- ---------------------------------------------------------------------------
+-- clerk_handoffs — one-time handoff between the browser SDK and PHP
+-- A random token is generated server-side after Clerk confirms the session;
+-- only its SHA-256 digest is stored, and it is single-use and short lived.
+-- ---------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS `clerk_handoffs` (
+    `id` BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+    `token_hash` CHAR(64) NOT NULL COMMENT 'SHA-256 of the session token. The token itself is never stored.',
+    `user_id` BIGINT UNSIGNED NOT NULL,
+    `clerk_user_id` VARCHAR(191) NULL DEFAULT NULL,
+    `state` ENUM('pending', 'consumed') NOT NULL DEFAULT 'pending',
+    `attempts` SMALLINT UNSIGNED NOT NULL DEFAULT 0,
+    `expires_at` DATETIME NOT NULL,
+    `consumed_at` DATETIME NULL DEFAULT NULL,
+    `ip_address` VARCHAR(45) NULL DEFAULT NULL,
+    `user_agent` VARCHAR(255) NULL DEFAULT NULL,
+    `created_at` TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (`id`),
+    UNIQUE KEY `clerk_handoffs_token_hash_unique` (`token_hash`),
+    KEY `clerk_handoffs_expires_at_index` (`expires_at`),
+    CONSTRAINT `clerk_handoffs_user_id_foreign`
+        FOREIGN KEY (`user_id`) REFERENCES `users` (`id`) ON DELETE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+-- ---------------------------------------------------------------------------
+-- clerk_sessions — mirror of the Clerk session backing a local PHP session
+-- Lets the app re-verify "is this session still alive?" with Clerk and lets
+-- an administrator see/stop active sessions. No tokens are stored.
+-- ---------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS `clerk_sessions` (
+    `id` BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+    `session_id` VARCHAR(191) NOT NULL COMMENT 'Clerk session id (sess_...)',
+    `user_id` BIGINT UNSIGNED NOT NULL,
+    `status` VARCHAR(32) NOT NULL DEFAULT 'active',
+    `expire_at` DATETIME NULL DEFAULT NULL,
+    `last_verified_at` DATETIME NULL DEFAULT NULL,
+    `ended_at` DATETIME NULL DEFAULT NULL,
+    `created_at` TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    `updated_at` TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    PRIMARY KEY (`id`),
+    UNIQUE KEY `clerk_sessions_session_id_unique` (`session_id`),
+    KEY `clerk_sessions_user_id_index` (`user_id`),
+    CONSTRAINT `clerk_sessions_user_id_foreign`
+        FOREIGN KEY (`user_id`) REFERENCES `users` (`id`) ON DELETE CASCADE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 -- ---------------------------------------------------------------------------

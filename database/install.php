@@ -82,7 +82,7 @@ $sql = preg_replace('/^\s*SET (NAMES|time_zone)\b.*?;\s*$/mis', '', $sql) ?? $sq
 // PDO::exec only runs a single statement on most drivers, so execute the
 // schema statement by statement (the files contain no stored procedures).
 $statements = array_filter(
-    array_map('trim', preg_split('/;\s*[\r\n]+/', $sql) ?: []),
+    array_map('trim', preg_split('/;\s*[\r\n]+/', preg_replace('/^\s*--.*$/m', '', $sql) ?? $sql) ?: []),
     static fn (string $statement): bool => $statement !== ''
         && !str_starts_with($statement, '--')
         && !str_starts_with($statement, 'PRAGMA')
@@ -92,7 +92,7 @@ foreach ($statements as $statement) {
     $pdo->exec($statement);
 }
 
-$tables = ['users', 'domains', 'subdomains', 'dns_records', 'reservations', 'audit_logs', 'abuse_reports'];
+$tables = ['users', 'domains', 'subdomains', 'dns_records', 'reservations', 'audit_logs', 'abuse_reports', 'clerk_handoffs', 'clerk_sessions'];
 $missing = [];
 
 foreach ($tables as $table) {

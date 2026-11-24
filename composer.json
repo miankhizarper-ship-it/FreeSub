@@ -1,0 +1,41 @@
+{
+    "name": "freesub/freesub",
+    "description": "FreeSub — free subdomain registration platform (PHP 8.2+, MySQL, Bootstrap 5).",
+    "type": "project",
+    "license": "MIT",
+    "require": {
+        "php": ">=8.2",
+        "ext-pdo": "*",
+        "ext-json": "*",
+        "ext-mbstring": "*",
+        "ext-openssl": "*",
+        "clerkinc/backend-php": "^3.0"
+    },
+    "require-dev": {
+        "phpunit/phpunit": "^11.5"
+    },
+    "config": {
+        "sort-packages": true,
+        "optimize-autoloader": true,
+        "allow-plugins": {
+            "php-http/discovery": false
+        }
+    },
+    "autoload": {
+        "classmap": [
+            "includes/"
+        ]
+    },
+    "scripts": {
+        "test": "php tests/run.php",
+        "migrate": "php database/migrate.php",
+        "clerk:check": "php database/clerk-check.php",
+        "lint": "find . -name '*.php' -not -path './vendor/*' -print0 | xargs -0 -n1 php -l"
+    },
+    "scripts-descriptions": {
+        "test": "Run the self-contained test suite (SQLite, no framework).",
+        "migrate": "Apply the Clerk identity migration.",
+        "clerk:check": "Verify the Clerk configuration without printing secrets.",
+        "lint": "Syntax-check every PHP file."
+    }
+}

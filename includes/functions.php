@@ -12,6 +12,10 @@ require_once FREESUB_ROOT . '/includes/database.php';
 if (!function_exists('config')) {
     /**
      * Read a dot-notated application config value.
+     *
+     * `$GLOBALS['FREESUB_CONFIG_OVERRIDE']` lets the test suite pin values that
+     * must not depend on the developer's local .env (Clerk keys, URLs). It is
+     * never set by the application itself.
      */
     function config(?string $key = null, mixed $default = null): mixed
     {
@@ -19,6 +23,10 @@ if (!function_exists('config')) {
 
         if ($config === null) {
             $config = require FREESUB_ROOT . '/config/app.php';
+        }
+
+        if (isset($GLOBALS['FREESUB_CONFIG_OVERRIDE']) && is_array($GLOBALS['FREESUB_CONFIG_OVERRIDE'])) {
+            $config = array_replace_recursive($config, $GLOBALS['FREESUB_CONFIG_OVERRIDE']);
         }
 
         if ($key === null || $key === '') {

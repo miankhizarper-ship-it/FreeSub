@@ -8,7 +8,10 @@
  * @var string|null $bodyClass
  * @var string|null $metaDescription
  * @var array<string, mixed>|null $authUser
+ * @var bool $loadClerk  Load the Clerk browser integration on this page
  */
+$loadClerk = $loadClerk ?? false;
+$clerkJsVersion = (string) config('clerk.js_version', '6.46.3');
 $authUser = $authUser ?? auth_user();
 $pageTitle = $pageTitle ?? 'Free subdomains for your next idea';
 $activeNav = $activeNav ?? null;
@@ -52,5 +55,9 @@ $appName = (string) config('name', 'FreeSub');
     <script src="<?= e(asset('vendor/bootstrap.bundle.min.js')) ?>" defer></script>
     <script src="<?= e(asset('vendor/lucide.min.js')) ?>" defer></script>
     <script src="<?= e(asset('js/app.js')) ?>" defer></script>
+    <?php if ($loadClerk): ?>
+        <script src="<?= e(asset('js/clerk-auth.js')) ?>" data-clerk-auth-script
+                data-clerk-js-version="<?= e($clerkJsVersion) ?>" defer></script>
+    <?php endif; ?>
 </body>
 </html>

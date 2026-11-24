@@ -12,7 +12,11 @@ CREATE TABLE IF NOT EXISTS users (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     name VARCHAR(100) NOT NULL,
     email VARCHAR(190) NOT NULL,
-    password_hash VARCHAR(255) NOT NULL,
+    password_hash VARCHAR(255) NULL,
+    clerk_user_id VARCHAR(191) NULL,
+    username VARCHAR(64) NULL,
+    avatar_url VARCHAR(500) NULL,
+    auth_provider VARCHAR(32) NOT NULL DEFAULT 'clerk',
     role TEXT NOT NULL DEFAULT 'user' CHECK (role IN ('user', 'admin')),
     status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'suspended', 'pending')),
     email_verified_at TEXT NULL,
@@ -24,8 +28,40 @@ CREATE TABLE IF NOT EXISTS users (
     updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 CREATE UNIQUE INDEX IF NOT EXISTS users_email_unique ON users (email);
+CREATE UNIQUE INDEX IF NOT EXISTS users_clerk_user_id_unique ON users (clerk_user_id);
 CREATE INDEX IF NOT EXISTS users_status_index ON users (status);
 CREATE INDEX IF NOT EXISTS users_role_index ON users (role);
+
+-- Clerk handoff/session bookkeeping. Only hashes are stored, never tokens.
+CREATE TABLE IF NOT EXISTS clerk_handoffs (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    token_hash CHAR(64) NOT NULL,
+    user_id INTEGER NOT NULL REFERENCES users (id) ON DELETE CASCADE,
+    clerk_user_id VARCHAR(191) NULL,
+    state TEXT NOT NULL DEFAULT 'pending' CHECK (state IN ('pending', 'consumed')),
+    attempts INTEGER NOT NULL DEFAULT 0,
+    expires_at TEXT NOT NULL,
+    consumed_at TEXT NULL,
+    ip_address VARCHAR(45) NULL,
+    user_agent VARCHAR(255) NULL,
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+CREATE UNIQUE INDEX IF NOT EXISTS clerk_handoffs_token_hash_unique ON clerk_handoffs (token_hash);
+CREATE INDEX IF NOT EXISTS clerk_handoffs_expires_at_index ON clerk_handoffs (expires_at);
+
+CREATE TABLE IF NOT EXISTS clerk_sessions (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    session_id VARCHAR(191) NOT NULL,
+    user_id INTEGER NOT NULL REFERENCES users (id) ON DELETE CASCADE,
+    status VARCHAR(32) NOT NULL DEFAULT 'active',
+    expire_at TEXT NULL,
+    last_verified_at TEXT NULL,
+    ended_at TEXT NULL,
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+CREATE UNIQUE INDEX IF NOT EXISTS clerk_sessions_session_id_unique ON clerk_sessions (session_id);
+CREATE INDEX IF NOT EXISTS clerk_sessions_user_id_index ON clerk_sessions (user_id);
 
 CREATE TABLE IF NOT EXISTS domains (
     id INTEGER PRIMARY KEY AUTOINCREMENT,

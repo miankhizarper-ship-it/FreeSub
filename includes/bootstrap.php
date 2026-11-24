@@ -195,3 +195,14 @@ require_once FREESUB_ROOT . '/includes/models/DnsRecord.php';
 require_once FREESUB_ROOT . '/includes/models/AbuseReport.php';
 require_once FREESUB_ROOT . '/includes/services/DnsProvider.php';
 require_once FREESUB_ROOT . '/includes/services/SubdomainService.php';
+
+/* -------------------------------------------------------------------------
+ * Clerk identity provider (authentication).
+ * Order matters: the token verifier is a dependency of ClerkConfig.
+ * ---------------------------------------------------------------------- */
+require_once FREESUB_ROOT . '/includes/services/Clerk/ClerkToken.php';
+require_once FREESUB_ROOT . '/includes/services/Clerk/ClerkTokenVerifier.php';
+require_once FREESUB_ROOT . '/includes/services/Clerk/ClerkConfig.php';
+require_once FREESUB_ROOT . '/includes/services/Clerk/ClerkApiClient.php';
+require_once FREESUB_ROOT . '/includes/services/Clerk/ClerkHandoff.php';
+require_once FREESUB_ROOT . '/includes/services/Clerk/ClerkWebhook.php';
