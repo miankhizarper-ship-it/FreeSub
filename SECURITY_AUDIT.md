@@ -640,9 +640,9 @@ web route that accepts a password.
 | `dns-lifecycle` | 53 | create → id persisted → audit, duplicate, cross-subdomain name, name outside the subdomain, private IPv4, **create 5xx not retried**, **write-landed-then-timeout reconciled without a duplicate**, update (+ private address, wrong domain), delete (ownership, single record, unmanaged record survives, soft delete, audited, idempotent, cross-domain refused), sync (unmanaged preserved, externally deleted reported, never recreated), provider availability incl. fail-open |
 | `dns-security` | 12 | factory degrades to null without credentials, token-without-zone refused, admin guard, CSRF ordering, no token in page source or template, no mutation control, plaintext base URL refused, interface unchanged |
 | `reservations` | 101 | strict validation (10 rejection classes), local-state availability, unmanaged-record blocking, TXT not blocking, fail-closed provider error (and not cached), cache reuse, request/duplicate/quota/cancel/expire, approval → `pending_dns` + one queued job, unverifiable record never activating, job cancel/retry, identity scoping, quota admin, two-account race, no web DNS write path |
-| `dashboard` | 76 | Task 05: status map equals the schema's CHECK constraint, release rules, timeline built only from recorded events, provisioning lookups carry no secret or operator error, quota view equals the enforced rule, ownership in SQL, POST/CSRF discipline on every page, no page can call the provider |
+| `dashboard` | 77 | Task 05: status map equals the schema's CHECK constraint, release rules, timeline built only from recorded events, provisioning lookups carry no secret or operator error, quota view equals the enforced rule, ownership in SQL, POST/CSRF discipline on every page, no page can call the provider |
 | `views` (mount-prefix) | 6 | a filesystem path can never become a URL prefix |
-| **Total** | **633** | all green, no network, isolated SQLite |
+| **Total** | **634** | all green, no network, isolated SQLite |
 | `tests/dashboard-render.php` | **88 checks** | every dashboard page rendered in-process: statistics match the database, zero/full/over quota, a foreign id yields the not-found page, timeline has no invented timestamp, and a forbidden-needle sweep proves no secret, provider id, operator error, Clerk identifier, filesystem path or stack trace reaches the HTML |
 | `tests/http-dashboard.py` | **83 checks** | real HTTP against a seeded database: the auth boundary on all six pages, marker-scoped statistics, cross-account isolation on list/detail/history, junk ids, CSRF (`419`, state unchanged), GET never mutates, releasing an active name refused in words, logout + post-logout denial, a second session unaffected |
 | `tests/http-clerk.sh` | **110 checks** | real HTTP: both pages render, no password field, every config key the JS reads, guest redirects, bridge hardening, full handoff, replay, admin denial, webhook signature/replay/idempotency, administrator migration, DNS diagnostics page (admin-only, no token, CSRF, no mutation, unconfigured-safe), availability API (free/reserved/malformed), reserve → stored pending → no longer available, release refused for a foreign id, reservation queue and quota controls (admin-only, CSRF, no token), logout |
@@ -770,7 +770,7 @@ of this system has been exercised against the live services it talks to.
 What that means concretely:
 
 * Every control these tasks asked for is implemented, and each one has a
-  regression test that would fail if it were removed. 633 unit/integration
+  regression test that would fail if it were removed. 634 unit/integration
   assertions, 88 render assertions, 83 dashboard HTTP checks and 110 end-to-end
   HTTP checks pass, the latter two also with
   `APP_DEBUG=false`.
@@ -801,7 +801,7 @@ disabled, and the admin page can only read.
 
 | Claim | Status |
 |-------|--------|
-| `MOCK TESTS PASSED` | **yes** — 101 reservation assertions (633 total), scripted Cloudflare transport, no credentials |
+| `MOCK TESTS PASSED` | **yes** — 101 reservation assertions (634 total), scripted Cloudflare transport, no credentials |
 | `END-TO-END HTTP` | **yes** — 110 checks, including reserve → approve → queue → run, plus 83 dashboard checks |
 | `MIGRATIONS APPLIED` | **yes** — fresh install, pre-Task-04 upgrade, duplicate-block path, idempotent re-run; MySQL DDL proven separately |
 | `LIVE ZONE READ FOR AVAILABILITY` | **no** — no Cloudflare credentials here |

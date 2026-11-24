@@ -185,7 +185,7 @@ stays disabled, and no subdomain is marked `active` by this work.
 
 | Claim | Status |
 |-------|--------|
-| Mocked test suites | **passed** (Task 03's 161 DNS assertions; 633 in the full run after Task 05) |
+| Mocked test suites | **passed** (Task 03's 161 DNS assertions; 634 in the full run after Task 05) |
 | Live Cloudflare connection | **not verified** — no credentials in the delivery environment |
 | DNS mutations against a real zone | **not verified** — not attempted |
 
@@ -270,7 +270,7 @@ Separate lines, because they are very different claims:
 
 | Claim | Status |
 |-------|--------|
-| Mocked test suites | **passed** — 633 assertions in `php tests/run.php` (101 of them Task 04) |
+| Mocked test suites | **passed** — 634 assertions in `php tests/run.php` (101 of them Task 04) |
 | End-to-end HTTP journeys | **passed** — 110 checks in `tests/http-clerk.sh` |
 | Migration on a pre-Task-04 database | **passed** — SQLite fresh, legacy upgrade, duplicate-block and idempotent re-run; MySQL DDL proven 9/9 separately |
 | Live Cloudflare read used for availability | **not verified** — no credentials in the delivery environment |
@@ -321,7 +321,7 @@ dependency, no business rule re-implemented in a template.
 - [x] No provider token, record id, operator error, Clerk identifier or stack trace in any rendered page
 
 **Tests**
-- [x] `tests/run.php` → 633 assertions (was 549); new `dashboard` suite has 76
+- [x] `tests/run.php` → 634 assertions (was 549); new `dashboard` suite has 77
 - [x] `tests/dashboard-render.php` → 88 assertions across eight rendered pages
 - [x] `tests/http-dashboard.py` → 83 HTTP checks (auth boundary, isolation, CSRF, release, logout)
 - [x] `tests/http-clerk.sh` → 110 checks (was 94), green under `APP_DEBUG=true` and `false`
@@ -329,7 +329,7 @@ dependency, no business rule re-implemented in a template.
 
 | Claim | Status |
 |-------|--------|
-| Mocked test suites | **passed** — 633 assertions (`dashboard`: 76) |
+| Mocked test suites | **passed** — 634 assertions (`dashboard`: 77) |
 | Render harness | **passed** — 88 assertions |
 | Dashboard HTTP checks | **passed** — 83, twice (debug on/off) |
 | End-to-end Clerk flow | **passed** — 110 checks, twice |

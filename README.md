@@ -937,7 +937,7 @@ Suites:
 | `views` | every view/link/redirect target exists, mount-prefix derivation |
 | `http` | HTTP journeys (needs a running server) |
 
-Current status: **633 assertions green** on PHP 8.5 with SQLite, plus **110
+Current status: **634 assertions green** on PHP 8.5 with SQLite, plus **110
 end-to-end HTTP checks** in `tests/http-clerk.sh` and **88 render + 83 HTTP
 dashboard checks** in `tests/dashboard.sh`. Every one of them passes with
 `APP_DEBUG=true` and `APP_DEBUG=false`. The MySQL schema in `database/schema.sql` was validated against a real MariaDB 13.1 engine (import, generated column, FKs, cascades, idempotent re-run).
@@ -973,7 +973,7 @@ a real installation.
 
 | Harness | What it is | Checks |
 |---------|------------|--------|
-| `tests/dashboard-suite.php` (suite `dashboard`) | in-process assertions, part of `tests/run.php` | 76 |
+| `tests/dashboard-suite.php` (suite `dashboard`) | in-process assertions, part of `tests/run.php` | 77 |
 | `tests/dashboard-render.php` | renders every page in-process and asserts on the HTML: statistics match the database, no secret appears, a foreign id yields the not-found page | 88 |
 | `tests/http-dashboard.py` | real HTTP against a seeded database: auth boundary, cross-account isolation, CSRF, GET-never-mutates, release refusal, logout, post-logout denial | 83 |
 

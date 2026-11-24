@@ -505,6 +505,15 @@ $t->check('the shell includes sign-out', str_contains(
     '/logout.php'
 ));
 
+$t->check('the mobile panel is absent from the desktop rendering', (static function (): bool {
+    $layout = (string) file_get_contents(FREESUB_ROOT . '/includes/views/layouts/dashboard.php');
+
+    // Exactly one of the two navigations may be present at any width, so the
+    // page never exposes the same link list twice to assistive tech.
+    return preg_match('/id="dashNav"[^>]*class="[^"]*d-lg-none"/', $layout) === 1
+        || preg_match('/class="[^"]*d-lg-none[^"]*"[^>]*id="dashNav"/', $layout) === 1;
+})());
+
 $t->check('the shell is not a second copy of the public navbar', !str_contains(
     (string) file_get_contents(FREESUB_ROOT . '/includes/views/layouts/dashboard.php'),
     "partial('partials/navbar'"

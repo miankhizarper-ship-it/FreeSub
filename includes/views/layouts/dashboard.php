@@ -105,7 +105,7 @@ $navItems = [
         </aside>
 
         <!-- ================= Mobile off-canvas ================= -->
-        <div class="offcanvas offcanvas-start dash-offcanvas" tabindex="-1" id="dashNav" aria-labelledby="dashNavLabel">
+        <div class="offcanvas offcanvas-start dash-offcanvas d-lg-none" tabindex="-1" id="dashNav" aria-labelledby="dashNavLabel">
             <div class="offcanvas-header">
                 <h2 class="offcanvas-title h5 mb-0" id="dashNavLabel"><?= e($appName) ?></h2>
                 <button type="button" class="btn-close" data-bs-dismiss="offcanvas" aria-label="Close navigation"></button>
@@ -177,7 +177,8 @@ $navItems = [
                     <a class="btn btn-sm btn-primary" href="<?= e(app_url('/dashboard/search.php')) ?>">
                         <i data-lucide="plus" aria-hidden="true"></i>
                         <span class="d-none d-sm-inline">New subdomain</span>
-                        <span class="d-sm-none">New</span>
+                        <span class="d-sm-none" aria-hidden="true">New</span>
+                        <span class="visually-hidden d-sm-none">New subdomain</span>
                     </a>
                 </div>
             </header>
