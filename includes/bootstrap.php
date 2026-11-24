@@ -213,6 +213,10 @@ require_once FREESUB_ROOT . '/includes/services/Subdomain/AvailabilityEngine.php
 require_once FREESUB_ROOT . '/includes/services/Subdomain/SubdomainQuota.php';
 require_once FREESUB_ROOT . '/includes/services/Subdomain/ProvisioningQueue.php';
 require_once FREESUB_ROOT . '/includes/services/Subdomain/ReservationService.php';
+
+// Task 05: presentation of canonical states for the user dashboard. Pure
+// functions over strings — it owns no business rules, only their wording.
+require_once FREESUB_ROOT . '/includes/services/Dashboard/DashboardStatus.php';
 require_once FREESUB_ROOT . '/includes/services/SubdomainService.php';
 
 /* -------------------------------------------------------------------------

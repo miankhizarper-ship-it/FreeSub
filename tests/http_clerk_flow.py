@@ -213,24 +213,28 @@ malformed = requests.get(f"{BASE}/api/check.php", params={"label": "Bad Label!"}
 malformed_body = malformed.json() if malformed.status_code == 200 else {}
 check("availability API rejects malformed input", malformed_body.get("available") is False, malformed_body)
 
-# Reservation through the dashboard form.
-dash_page = session.get(f"{BASE}/dashboard.php")
-check("dashboard exposes the reservation form", "reserve" in dash_page.text.lower())
-reserve_no_csrf = session.post(f"{BASE}/dashboard.php",
+# Reservation through the dashboard's own form (Task 05 moved it from the
+# overview to /dashboard/search.php, which is where the shell links to).
+search_page = session.get(f"{BASE}/dashboard/search.php")
+check("the dashboard shell links to the reservation form", "/dashboard/search.php" in session.get(f"{BASE}/dashboard.php").text)
+check("the reservation form is on its own page", "name=\"label\"" in search_page.text)
+reserve_no_csrf = session.post(f"{BASE}/dashboard/search.php",
                                data={"action": "reserve", "label": "e2e-reserved"},
                                allow_redirects=False)
 check("reservation requires CSRF", reserve_no_csrf.status_code == 419, reserve_no_csrf.status_code)
 
-reserve_token = csrf(dash_page)
+reserve_token = csrf(search_page)
 accepted = session.post(
-    f"{BASE}/dashboard.php",
+    f"{BASE}/dashboard/search.php",
     data={"action": "reserve", "label": "e2e-reserved", "domain_id": "1", "_token": reserve_token},
     allow_redirects=False,
 )
 check("a valid reservation is accepted", accepted.status_code in (302, 303), accepted.status_code)
 
-after_reserve = session.get(f"{BASE}/dashboard.php")
+# It must be visible in the account's own history, which is where a person looks.
+after_reserve = session.get(f"{BASE}/dashboard/reservations.php")
 check("the reservation is listed for its owner", "e2e-reserved" in after_reserve.text)
+check("the reservation is listed with its outcome", "Awaiting review" in after_reserve.text)
 
 connection = db()
 pending_row = connection.execute(
@@ -259,6 +263,25 @@ release = session.post(
     allow_redirects=False,
 )
 check("an unknown subdomain id is refused", release.status_code in (302, 303), release.status_code)
+
+print("User dashboard")
+check("the overview renders the app shell", 'class="dash-shell"' in session.get(f"{BASE}/dashboard.php").text)
+check("the subdomain list renders", session.get(f"{BASE}/dashboard/subdomains.php").status_code == 200)
+check("the reservation history renders", session.get(f"{BASE}/dashboard/reservations.php").status_code == 200)
+check("the account page renders", session.get(f"{BASE}/dashboard/settings.php").status_code == 200)
+check("an unknown subdomain is a 404, not a 403 that confirms it exists",
+      session.get(f"{BASE}/dashboard/subdomain.php?id=999999", allow_redirects=False).status_code == 404)
+check("an unknown subdomain page discloses nothing",
+      "not-yours" not in session.get(f"{BASE}/dashboard/subdomain.php?id=999999").text)
+check("a junk subdomain id is refused", session.get(f"{BASE}/dashboard/subdomain.php?id=abc").status_code == 404)
+check("the dashboard never renders a Clerk secret", "sk_test" not in session.get(f"{BASE}/dashboard.php").text)
+check("the account page offers no password field", 'type="password"' not in session.get(f"{BASE}/dashboard/settings.php").text)
+check("the account page exposes no role control", 'name="role"' not in session.get(f"{BASE}/dashboard/settings.php").text)
+check("every dashboard page requires a session", all(
+    requests.get(f"{BASE}{path}", allow_redirects=False).status_code in (302, 303)
+    for path in ("/dashboard/subdomains.php", "/dashboard/subdomain.php?id=1",
+                 "/dashboard/reservations.php", "/dashboard/search.php", "/dashboard/settings.php")
+))
 
 print("Authorization")
 check("normal user is denied the admin area",

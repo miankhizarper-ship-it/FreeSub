@@ -121,33 +121,75 @@ if (!function_exists('app_base_path')) {
             return $cached;
         }
 
-        $cached = '';
+        $cached = app_base_path_from(
+            (string) ($_SERVER['SCRIPT_NAME'] ?? ''),
+            (string) ($_SERVER['SCRIPT_FILENAME'] ?? ''),
+            (string) ($_SERVER['REQUEST_URI'] ?? '')
+        );
 
-        $scriptName = str_replace('\\', '/', (string) ($_SERVER['SCRIPT_NAME'] ?? ''));
-        $scriptFile = (string) ($_SERVER['SCRIPT_FILENAME'] ?? '');
+        return $cached;
+    }
+}
+
+if (!function_exists('app_base_path_from')) {
+    /**
+     * Resolve a mount prefix from explicit request values.
+     *
+     * Separated from app_base_path() so it stays a pure function of its inputs:
+     * it is memoised once per request in production and exercised directly by
+     * the test suite with hostile values.
+     *
+     * A prefix is a URL path, never a filesystem path. Some SAPI and CLI
+     * combinations put the absolute script path in SCRIPT_NAME, and pasting
+     * that into generated links both breaks them and leaks the install
+     * directory into the markup, so two independent guards apply:
+     *
+     *   1. the prefix must not contain the application root on disk;
+     *   2. when the request URI is known, the prefix must actually be a prefix
+     *      of it — that is what "mounted at /sub" means.
+     */
+    function app_base_path_from(string $scriptName, string $scriptFile, string $requestUri = ''): string
+    {
+        $scriptName = str_replace('\\', '/', $scriptName);
 
         if ($scriptName === '' || $scriptFile === '') {
-            return $cached;
+            return '';
         }
 
         $realScript = realpath($scriptFile);
         $realRoot = realpath(FREESUB_ROOT);
 
-        if ($realScript === false || $realRoot === false || !str_starts_with($realScript, $realRoot)) {
-            return $cached;
+        // Must be *inside* the app root, not merely prefixed by its name:
+        // /srv/freesub2 must not be treated as /srv/freesub.
+        if ($realScript === false || $realRoot === false
+            || ($realScript !== $realRoot && !str_starts_with($realScript, rtrim($realRoot, '/') . '/'))) {
+            return '';
         }
 
         // "/admin/reservations.php" — the script path relative to the app root.
         $relative = str_replace('\\', '/', substr($realScript, strlen($realRoot)));
 
         if ($relative === '' || !str_ends_with($scriptName, $relative)) {
-            return $cached;
+            return '';
         }
 
-        $prefix = substr($scriptName, 0, strlen($scriptName) - strlen($relative));
-        $cached = rtrim($prefix, '/');
+        $prefix = rtrim(substr($scriptName, 0, strlen($scriptName) - strlen($relative)), '/');
 
-        return $cached;
+        if ($prefix === '') {
+            return '';
+        }
+
+        if (str_contains($prefix, $realRoot)) {
+            return '';
+        }
+
+        $requestUri = str_replace('\\', '/', $requestUri);
+
+        if ($requestUri !== '' && !str_starts_with($requestUri, $prefix . '/') && $requestUri !== $prefix) {
+            return '';
+        }
+
+        return $prefix;
     }
 }
 
@@ -713,12 +755,38 @@ if (!function_exists('asset')) {
 }
 
 if (!function_exists('is_active_path')) {
+    /**
+     * Is the current request one of these paths?
+     *
+     * Matches on segment boundaries, not raw prefixes: `/subdomain.php` must not
+     * match `/subdomain.php5` or `/subdomain.php.bak`, and `/dashboard.php` must
+     * not match `/dashboard.php.evil`. A query string never affects the answer
+     * because current_path() already drops it.
+     */
     function is_active_path(string ...$paths): bool
     {
-        $current = current_path();
+        $current = rtrim(current_path(), '/');
+
+        if ($current === '') {
+            $current = '/';
+        }
 
         foreach ($paths as $path) {
-            if ($path === '/' ? $current === '/' || $current === '/index.php' : str_starts_with($current, $path)) {
+            $candidate = rtrim($path, '/');
+
+            if ($candidate === '') {
+                $candidate = '/';
+            }
+
+            if ($candidate === '/') {
+                if ($current === '/' || $current === '/index.php') {
+                    return true;
+                }
+
+                continue;
+            }
+
+            if ($current === $candidate || str_starts_with($current, $candidate . '/')) {
                 return true;
             }
         }

@@ -19,6 +19,7 @@ FreeSub lets registered users search for a subdomain on a root domain the platfo
 - [Authentication (Clerk)](#authentication-clerk)
 - [DNS engine (Cloudflare)](#dns-engine-cloudflare)
 - [Subdomain availability & reservations](#subdomain-availability--reservations)
+- [User dashboard](#user-dashboard)
 - [Security model](#security-model)
 - [How root domains work](#how-root-domains-work)
 - [Tests](#tests)
@@ -237,8 +238,8 @@ freesub/
 ├── admin/                  Admin screens (overview, domains, reservations, users, abuse)
 ├── api/check.php           Public JSON availability endpoint (read-only)
 ├── assets/
-│   ├── css/app.css         Design system (tokens, components, responsive rules)
-│   ├── js/app.js           Icons, header, reveal, live search
+│   ├── css/app.css         Design system (tokens, components, dashboard shell, responsive rules)
+│   ├── js/app.js           Icons, header, reveal, live search, busy-form + copy guards
 │   ├── vendor/             Bootstrap CSS/JS + Lucide (vendored, no CDN)
 │   ├── fonts/              Self-hosted Plus Jakarta Sans
 │   └── images/             Favicon, logo mark, social cover
@@ -266,13 +267,15 @@ freesub/
 │   ├── validation.php      Label, profile and abuse validators
 │   ├── models/             User, Domain, Reservation, Subdomain, DnsRecord, AbuseReport
 │   ├── services/
+│   │   ├── Dashboard/      DashboardStatus — canonical state → user-facing words
 │   │   ├── Clerk/          ClerkConfig, ClerkTokenVerifier, ClerkApiClient,
 │   │   │                   ClerkHandoff, ClerkWebhook, ClerkToken
 │   │   ├── Dns/            CloudflareDnsProvider, CloudflareApiClient, DnsLog,
 │   │   │                   DnsRecordValidator, DnsRecordRepository, DnsManager
 │   │   ├── DnsProvider.php DnsProvider (interface, null driver, factory)
 │   │   └── SubdomainService.php
-│   └── views/              Layouts, partials (incl. clerk-auth.php), pages, admin screens
+│   └── views/              Layouts (public/app/dashboard/admin), partials
+│                           (incl. clerk-auth.php, status-badge.php), pages, admin, dashboard/
 ├── clerk/
 │   └── webhook.php         Clerk webhook receiver (svix signature verified)
 ├── storage/                Logs, cache (incl. JWKS cache), sessions (git-ignored)
@@ -283,6 +286,11 @@ freesub/
 │   ├── support/ClerkTestHarness.php   RSA signing + stubbed Backend API
 │   ├── support/CloudflareTestDouble.php   In-memory Cloudflare v4 API
 │   ├── fixtures/           Test-only RSA key pairs (never used for anything real)
+│   ├── dashboard-suite.php  Task 05 unit assertions (suite: dashboard)
+│   ├── dashboard-render.php Renders every dashboard page and asserts on the HTML
+│   ├── http-dashboard.py    Task 05 HTTP + cross-account isolation checks
+│   ├── dashboard.sh         Runs all of the above, both debug modes
+│   ├── seed-dashboard.php   Seeds the local preview database
 │   ├── http-journeys.php   Foundation HTTP journeys via cURL
 │   ├── http-clerk.sh       End-to-end Clerk flow over real HTTP
 │   └── router-e2e.php      Router used only by the end-to-end run
@@ -290,7 +298,10 @@ freesub/
 ├── login.php register.php logout.php
 ├── clerk-bridge.php        Privileged same-origin handoff endpoint
 ├── auth/handoff.php        Redeems a handoff ticket into a session
-├── dashboard.php
+├── dashboard.php           Signed-in overview
+├── dashboard/              subdomains.php, subdomain.php, reservations.php,
+│                           search.php, settings.php
+├── preview-login.php        Local-only dashboard preview (guarded; 404 otherwise)
 ├── extensions.php abuse.php 404.php
 ├── admin/ api/
 ├── router.php              Router for `php -S` (404 handling, dot-file blocking)
@@ -713,6 +724,140 @@ and a two-account race on one label.
 
 ---
 
+## User dashboard
+
+The signed-in product. Every page is server-rendered PHP with Bootstrap 5 and a
+little vanilla JavaScript; there is no client framework, no build step, and no
+second state store — the database is the only source of truth.
+
+| Page | File | What it shows |
+|------|------|---------------|
+| Overview | `dashboard.php` | Account, the four headline statistics, quota with a bar, recent activity |
+| My subdomains | `dashboard/subdomains.php` | Every name on the account, filterable by canonical status |
+| Subdomain detail | `dashboard/subdomain.php?id=…` | Basic info, DNS/provisioning state, timeline, release |
+| Reservations | `dashboard/reservations.php` | Every request this account ever made, and its outcome |
+| Find a subdomain | `dashboard/search.php` | Availability check + reservation form |
+| Account | `dashboard/settings.php` | Profile, quota, security facts, sign-out |
+
+`preview-login.php` is a **local-only** helper for looking at these pages without
+Clerk credentials; it refuses to run unless `APP_ENV` is `local`/`testing` *and*
+the database is the seeded preview file. See [Previewing the dashboard](#previewing-the-dashboard).
+
+### The shell
+
+`includes/views/layouts/dashboard.php` replaces the public navbar for signed-in
+pages only (`layouts/public` and `layouts/admin` are untouched). One navigation
+definition drives two renderings:
+
+- **≥ 992px** — a fixed sidebar with the account block and sign-out at the foot.
+- **< 992px** — the same links inside a Bootstrap `offcanvas` panel opened from a
+  top-bar button, so focus trapping, Escape and the backdrop are Bootstrap's own
+  behaviour rather than a hand-rolled imitation.
+
+There is exactly one `<nav>` per breakpoint and both are in the document, so the
+shell works with JavaScript disabled at desktop width and the off-canvas is the
+only thing that needs it.
+
+### Where the numbers come from
+
+Nothing on the dashboard is hardcoded:
+
+- **Statistics** are counted from `subdomains` and `reservations` scoped to
+  `Auth::id()`.
+- **Quota** is `SubdomainQuota::overview()` — the same service the reservation
+  endpoint enforces, so the page cannot advertise an allowance the server would
+  refuse. `used` is the account-wide figure `ReservationService::create()`
+  compares against the per-domain allowance; the per-extension breakdown is shown
+  next to it so no single number appears without its context.
+- **Timestamps** are printed only when the row carries one. A timeline step for
+  an event that never happened is simply absent — no placeholder date is ever
+  invented.
+
+The list page costs a constant number of queries regardless of row count:
+`Subdomain::provisioningForMany()` fetches the latest job for every row in one
+statement.
+
+### Statuses the user sees
+
+`includes/services/Dashboard/DashboardStatus.php` is the single place where a
+canonical backend state becomes words. It invents no state and decides no rule.
+
+| Stored state | Label | Meaning shown |
+|--------------|-------|---------------|
+| `pending_dns` | Pending DNS | Approved and queued; record not created yet |
+| `active` | Active | Record exists and was read back |
+| `suspended` | Suspended | Paused; contact support |
+| `failed` | Provisioning failed | Could not be created or verified; support can retry |
+| `terminated` | Released | No longer yours; the label may be available again |
+
+Reservations use the same treatment (`Awaiting review`, `Approved`, `Rejected`,
+`Cancelled`, `Expired`). Every badge is a word **and** a colour, so status never
+depends on colour alone, and the timeline repeats each step's state in text for
+screen readers.
+
+### What the dashboard deliberately does not do
+
+- **No provisioning.** It cannot create, edit or trigger a DNS record. The only
+  writer of `active` is `ProvisioningQueue::provision()`, reached from the admin
+  queue or the CLI. The dashboard never calls the provider.
+- **No availability logic in JavaScript.** The form asks `/api/check.php` for a
+  courtesy verdict; `ReservationService::create()` re-runs validation,
+  availability (including the live zone) and quota on POST. A stale "available"
+  in the browser cannot book a taken name. With JavaScript off the form still
+  posts and the server answers honestly.
+- **No credential management.** The name and e-mail on the account are a verified
+  copy of the Clerk identity, and FreeSub stores no password for web users. The
+  Account page explains where to change them instead of offering a form that
+  would either silently revert or let someone claim an unverified address.
+- **No role or auth changes.** Nothing in the dashboard can alter a role,
+  suspend an account or start a different kind of session.
+
+### Ownership and error behaviour
+
+Every read is scoped in SQL — `Subdomain::findForUser($id, Auth::id())`,
+`ReservationService::history($userId)`, `Subdomain::forUser($userId)`. No request
+value ever selects a user.
+
+A subdomain that belongs to someone else is treated **exactly** like one that
+does not exist: `404` with the same page. A `403` would confirm the id is real
+and turn the URL into an enumeration oracle. Ids are validated as digits before
+they are cast, so `/dashboard/subdomain.php?id=1e3` is a `404`, not an `int` cast
+of `1`.
+
+### Mutations
+
+Two, both `POST` + CSRF, both re-validated server-side:
+
+| Action | Where | Rules |
+|--------|-------|-------|
+| Reserve a name | `dashboard/search.php` | `ReservationService::create()` — validation, availability, quota, transactional uniqueness; rate-limited per account |
+| Cancel a request | `dashboard/reservations.php` | `ReservationService::cancel()` — pending only, ownership in SQL, audited |
+| Release a name | `dashboard.php` (POST) | `DashboardStatus::canReleaseFromDashboard()` — `pending_dns`/`failed`/`suspended` only |
+
+Releasing an `active` name is refused with an explanation, because its record has
+to be deleted through the audited DNS path; the same refusal the CLI documents.
+
+### Previewing the dashboard
+
+```
+DB_SQLITE_PATH=storage/dashboard-preview.sqlite php database/install.php --fresh --force
+DB_SQLITE_PATH=storage/dashboard-preview.sqlite php database/migrate.php
+DB_SQLITE_PATH=storage/dashboard-preview.sqlite php tests/seed-dashboard.php
+
+APP_ENV=local DB_SQLITE_PATH=storage/dashboard-preview.sqlite   php -S 127.0.0.1:8000 router.php
+```
+
+Then open `/preview-login.php?a=owner` (or `?a=other` for the second account used
+by the isolation checks). The seed creates an active, a pending, a failed, a
+suspended and a released subdomain, records in every reservation state, and a
+second account whose rows must stay unreachable.
+
+The preview database and the helper are for local work only; `preview-login.php`
+returns `404` unless the environment and the database path both match. Delete
+both when you are done (`php tests/seed-dashboard.php --reset`).
+
+---
+
 ## Security model
 
 **Authentication.** Clerk handles every credential: registration, sign-in, Google OAuth, e-mail verification and password recovery all happen inside Clerk's components mounted on our own pages with the official `clerk-js` browser build. FreeSub stores **no passwords for web users**. See [Authentication](#authentication-clerk) for the flow. Sessions regenerate on login/logout and are bound to a fingerprint of the client; the stored user is re-loaded from the database on every request, so a suspended, deleted or re-linked account loses access immediately.
@@ -787,11 +932,15 @@ Suites:
 | `dns-live` | optional read-only check against a real zone (needs `FREESUB_DNS_LIVE=1` and real credentials; skipped otherwise) |
 | `subdomains` | labels, reservations, quota, duplicate fqdn, no DNS on reservation |
 | `reservations` | Task 04 engine: strict validation, availability against local state and a scripted zone, fail-closed provider errors, not cached, cache reuse, request/cancel/approve/reject/expire, quota, provisioning verification (run/retry/cancel), CLI guard rules, identity scoping, two-account race |
+| `dashboard` | Task 05: status map vs the schema, release rules, timeline built only from real events, provisioning lookups carry no secrets, quota view equals the enforced rule, ownership in SQL, POST/CSRF discipline, no provider call from any page |
 | `audit` | audit trail and abuse reports |
-| `views` | every view/link/redirect target exists |
+| `views` | every view/link/redirect target exists, mount-prefix derivation |
 | `http` | HTTP journeys (needs a running server) |
 
-Current status: **549 assertions green** on PHP 8.5 with SQLite, plus **94 end-to-end HTTP checks** in `tests/http-clerk.sh`. The MySQL schema in `database/schema.sql` was validated against a real MariaDB 13.1 engine (import, generated column, FKs, cascades, idempotent re-run).
+Current status: **633 assertions green** on PHP 8.5 with SQLite, plus **110
+end-to-end HTTP checks** in `tests/http-clerk.sh` and **88 render + 83 HTTP
+dashboard checks** in `tests/dashboard.sh`. Every one of them passes with
+`APP_DEBUG=true` and `APP_DEBUG=false`. The MySQL schema in `database/schema.sql` was validated against a real MariaDB 13.1 engine (import, generated column, FKs, cascades, idempotent re-run).
 
 The tests use a throwaway database file (`storage/test-<pid>.sqlite`) and delete it afterwards. They never touch production data.
 
@@ -808,6 +957,37 @@ prove the engine behaves correctly against the documented API — not that a liv
 zone accepts it (see [Verifying the integration](#verifying-the-integration)).
 
 The Clerk suites need no network and no real Clerk secret: tokens are signed with a committed **test-only** RSA key pair (`tests/fixtures/`), served to the verifier as a JWKS document, and the Backend API is replaced at `ClerkApiClient`'s transport seam. What they cannot prove is that a live Clerk instance issues tokens shaped the way we expect — that requires the owner's dashboard, see [Verifying against Clerk](#verifying-against-clerk).
+
+
+### Verifying the dashboard
+
+One command runs everything this page describes:
+
+```bash
+tests/dashboard.sh            # lint, unit suites, render harness, HTTP checks × 2
+```
+
+It builds its own throwaway SQLite database under `storage/`, seeds it, starts a
+real server, and deletes it all on exit. It never touches `storage/dev.sqlite` or
+a real installation.
+
+| Harness | What it is | Checks |
+|---------|------------|--------|
+| `tests/dashboard-suite.php` (suite `dashboard`) | in-process assertions, part of `tests/run.php` | 76 |
+| `tests/dashboard-render.php` | renders every page in-process and asserts on the HTML: statistics match the database, no secret appears, a foreign id yields the not-found page | 88 |
+| `tests/http-dashboard.py` | real HTTP against a seeded database: auth boundary, cross-account isolation, CSRF, GET-never-mutates, release refusal, logout, post-logout denial | 83 |
+
+`tests/http-dashboard.py` needs the seeded preview database and a running
+server; `tests/dashboard.sh` arranges both.
+
+| Claim | How to prove it | Done here? |
+|-------|-----------------|------------|
+| `DASHBOARD PAGES RENDER` | `tests/dashboard.sh` | **yes** |
+| `OWNERSHIP ENFORCED` | cross-account checks in the render harness and the HTTP checks | **yes** |
+| `CSRF ON EVERY MUTATION` | tokenless and forged-token POSTs return `419` and change nothing | **yes** |
+| `NO SECRETS OR STACK TRACES` | forbidden-needle sweep over eight rendered pages | **yes** |
+| `RESPONSIVE AT 320–1440` | structural (no fixed widths, cards instead of tables, wrapping hostnames) — **not visually confirmed**: no browser binary is reachable in the delivery environment | **no** |
+| `LIVE CLOUDFLARE PROVISIONING SHOWN IN THE UI` | requires real credentials; the dashboard only displays what the database already recorded | **no** |
 
 ---
 

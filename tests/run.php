@@ -497,7 +497,14 @@ if (run_suite($only, 'reservations')) {
 }
 
 /* -------------------------------------------------------------------------
- * 6. Audit logging and abuse
+ * 6. User dashboard (Task 05)
+ * ---------------------------------------------------------------------- */
+if (run_suite($only, 'dashboard')) {
+    require __DIR__ . '/dashboard-suite.php';
+}
+
+/* -------------------------------------------------------------------------
+ * 7. Audit logging and abuse
  * ---------------------------------------------------------------------- */
 if (run_suite($only, 'audit')) {
     $t->suite('Audit & abuse');
@@ -538,7 +545,7 @@ if (run_suite($only, 'audit')) {
 }
 
 /* -------------------------------------------------------------------------
- * 7. Output helpers / views
+ * 8. Output helpers / views
  * ---------------------------------------------------------------------- */
 if (run_suite($only, 'views')) {
     $t->suite('Views & helpers');
@@ -549,7 +556,11 @@ if (run_suite($only, 'views')) {
     $t->check('every public view file exists', (static function (): bool {
         $views = ['home', 'extensions', 'abuse', 'auth/login', 'auth/register', 'errors/404', 'errors/403', 'errors/setup',
             'dashboard', 'admin/overview', 'admin/domains', 'admin/dns', 'admin/reservations', 'admin/users', 'admin/abuse',
-            'layouts/public', 'layouts/app', 'layouts/admin', 'partials/navbar', 'partials/footer', 'partials/flashes'];
+            'layouts/public', 'layouts/app', 'layouts/admin', 'partials/navbar', 'partials/footer', 'partials/flashes',
+            // Task 05 user dashboard
+            'layouts/dashboard', 'partials/status-badge',
+            'dashboard/overview', 'dashboard/subdomains', 'dashboard/subdomain', 'dashboard/subdomain-missing',
+            'dashboard/reservations', 'dashboard/search', 'dashboard/settings'];
 
         foreach ($views as $view) {
             if (!is_file(FREESUB_ROOT . '/includes/views/' . $view . '.php')) {
@@ -566,6 +577,7 @@ if (run_suite($only, 'views')) {
             glob(FREESUB_ROOT . '/*.php') ?: [],
             glob(FREESUB_ROOT . '/admin/*.php') ?: [],
             glob(FREESUB_ROOT . '/api/*.php') ?: [],
+            glob(FREESUB_ROOT . '/dashboard/*.php') ?: [],
             glob(FREESUB_ROOT . '/includes/*.php') ?: []
         );
 
@@ -594,6 +606,38 @@ if (run_suite($only, 'views')) {
         }
 
         return $bad === [];
+    })());
+
+    // app_base_path_from() must never emit a filesystem path as a URL prefix.
+    // Some SAPI/CLI combinations put the absolute script path in SCRIPT_NAME;
+    // that used to end up inside every asset() and app_url() on the page.
+    $t->check('a root install resolves to an empty prefix', app_base_path_from('/dashboard.php', FREESUB_ROOT . '/dashboard.php', '/dashboard.php') === '');
+    $t->check('a sub-path install resolves to its sub-path', app_base_path_from('/sub/dashboard.php', FREESUB_ROOT . '/dashboard.php', '/sub/dashboard.php') === '/sub');
+    $t->check('an absolute SCRIPT_NAME never becomes a prefix', app_base_path_from(FREESUB_ROOT . '/dashboard.php', FREESUB_ROOT . '/dashboard.php', '/dashboard.php') === '');
+    $t->check('a prefix that the request URI does not start with is rejected', app_base_path_from('/other/dashboard.php', FREESUB_ROOT . '/dashboard.php', '/dashboard.php') === '');
+    $t->check('a script outside the app root is rejected', app_base_path_from('/x.php', '/tmp/x.php', '/x.php') === '');
+    $t->check('a sibling directory sharing the root name is rejected',
+        app_base_path_from('/x.php', FREESUB_ROOT . '2/x.php', '/x.php') === '');
+    $t->check('missing request values degrade to no prefix', app_base_path_from('', '', '') === '');
+
+    $t->check('an asset url never contains the install directory', (static function (): bool {
+        $scriptName = $_SERVER['SCRIPT_NAME'] ?? null;
+        $scriptFile = $_SERVER['SCRIPT_FILENAME'] ?? null;
+        $requestUri = $_SERVER['REQUEST_URI'] ?? null;
+
+        $_SERVER['SCRIPT_NAME'] = FREESUB_ROOT . '/dashboard.php';
+        $_SERVER['SCRIPT_FILENAME'] = FREESUB_ROOT . '/dashboard.php';
+        $_SERVER['REQUEST_URI'] = '/dashboard.php';
+
+        // app_base_path() memoises, so assert on the pure resolver the memoised
+        // value comes from, and on the shape of a URL it produces.
+        $prefix = app_base_path_from($_SERVER['SCRIPT_NAME'], $_SERVER['SCRIPT_FILENAME'], $_SERVER['REQUEST_URI']);
+
+        $_SERVER['SCRIPT_NAME'] = $scriptName;
+        $_SERVER['SCRIPT_FILENAME'] = $scriptFile;
+        $_SERVER['REQUEST_URI'] = $requestUri;
+
+        return $prefix === '' && !str_contains(asset('css/app.css'), 'home');
     })());
 
     $t->check('initials helper', initials('Ada Lovelace') === 'AL');
@@ -641,7 +685,7 @@ if (run_suite($only, 'views')) {
 }
 
 /* -------------------------------------------------------------------------
- * 8. HTTP journeys (needs a running server)
+ * 9. HTTP journeys (needs a running server)
  * ---------------------------------------------------------------------- */
 if (run_suite($only, 'http')) {
     $t->suite('HTTP journeys');

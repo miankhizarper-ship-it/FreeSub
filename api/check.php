@@ -58,7 +58,11 @@ $response = [
 ];
 
 if ($result['available']) {
-    $reserveUrl = app_url('/dashboard.php?reserve=1&label=' . rawurlencode($result['label']));
+    // Point at the reservation form itself. /dashboard.php is the overview and
+    // carries no form any more (Task 05), and /dashboard/ is not a routable
+    // path on Apache without a rewrite rule, so the link goes straight to the
+    // page that can act on it.
+    $reserveUrl = app_url('/dashboard/search.php?label=' . rawurlencode($result['label']));
 
     if ($domain !== null) {
         $reserveUrl .= '&domain_id=' . (int) $domain['id'];

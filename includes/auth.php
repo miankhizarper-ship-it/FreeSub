@@ -440,6 +440,12 @@ final class Auth
         $clerkUserId = $_SESSION[self::CLERK_KEY] ?? null;
         $breakGlass = ($_SESSION['_auth_break_glass'] ?? false) === true;
 
+        // The identity model is loaded explicitly: Auth is required by the
+        // bootstrap before the models are, so relying on the caller having
+        // included it first made this path fatal on any request that resolved a
+        // session before touching a model.
+        require_once __DIR__ . '/models/User.php';
+
         if (!$breakGlass && (!is_string($clerkUserId) || !User::isClerkUserId($clerkUserId))) {
             // A session without a verified identity is never trusted, including
             // sessions created before the Clerk migration.

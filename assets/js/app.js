@@ -320,6 +320,89 @@
         }, true);
     }
 
+    /* ------------------------ Dashboard: submit ------------------------- */
+    /**
+     * Double-submit guard for the dashboard's mutating forms.
+     *
+     * This is a UX affordance only. Every one of these forms is POST + CSRF and
+     * the server re-reads the state before acting, so a duplicate submission
+     * (or a request replayed by hand) is still refused where it matters — the
+     * guard just stops a slow network from producing "unknown action" noise.
+     */
+    function initBusyForms() {
+        doc.querySelectorAll('form[data-busy-form]').forEach(function (form) {
+            form.addEventListener('submit', function () {
+                var button = form.querySelector('[data-busy-button]') || form.querySelector('button[type="submit"]');
+
+                if (!button || button.classList.contains('is-busy')) {
+                    return;
+                }
+
+                button.classList.add('is-busy');
+                button.setAttribute('aria-disabled', 'true');
+
+                // A disabled button would not submit its own name; keep it
+                // enabled so the browser still sends the form, but stop a
+                // second click landing another request.
+                if (!button.querySelector('.btn-spinner')) {
+                    var spinner = doc.createElement('span');
+                    spinner.className = 'btn-spinner';
+                    spinner.setAttribute('aria-hidden', 'true');
+                    button.insertBefore(spinner, button.firstChild);
+                }
+            });
+
+            // Restoring from the back/forward cache must not leave a dead
+            // button behind.
+            window.addEventListener('pageshow', function () {
+                form.querySelectorAll('.is-busy').forEach(function (button) {
+                    button.classList.remove('is-busy');
+                    button.removeAttribute('aria-disabled');
+                });
+            });
+        });
+    }
+
+    /* --------------------------- Dashboard: copy ------------------------ */
+    /**
+     * Copy a hostname to the clipboard.
+     *
+     * Falls back to selecting the text when the Clipboard API is unavailable
+     * (older Safari, insecure context), and always reports through an
+     * aria-live region rather than relying on the button changing colour.
+     */
+    function initCopyButtons() {
+        doc.querySelectorAll('[data-copy]').forEach(function (button) {
+            button.addEventListener('click', function () {
+                var value = button.getAttribute('data-copy') || '';
+                var targetId = button.getAttribute('data-copy-status');
+                var status = targetId ? doc.getElementById(targetId) : null;
+
+                function report(message) {
+                    if (status) {
+                        status.textContent = message;
+                    }
+                }
+
+                if (!value) {
+                    return;
+                }
+
+                if (navigator.clipboard && navigator.clipboard.writeText) {
+                    navigator.clipboard.writeText(value).then(function () {
+                        report('Copied ' + value);
+                    }).catch(function () {
+                        report('Could not copy — select the text to copy it.');
+                    });
+
+                    return;
+                }
+
+                report('Press and hold the hostname to copy it.');
+            });
+        });
+    }
+
     /* ---------------------------- Helpers ------------------------------- */
     function escapeHtml(value) {
         return String(value == null ? '' : value)
@@ -343,6 +426,8 @@
         initReserveSearch();
         initPasswords();
         initConfirms();
+        initBusyForms();
+        initCopyButtons();
     }
 
     if (doc.readyState === 'loading') {

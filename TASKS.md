@@ -185,7 +185,7 @@ stays disabled, and no subdomain is marked `active` by this work.
 
 | Claim | Status |
 |-------|--------|
-| Mocked test suites | **passed** (Task 03's 161 DNS assertions; 549 in the full run after Task 04) |
+| Mocked test suites | **passed** (Task 03's 161 DNS assertions; 633 in the full run after Task 05) |
 | Live Cloudflare connection | **not verified** — no credentials in the delivery environment |
 | DNS mutations against a real zone | **not verified** — not attempted |
 
@@ -270,8 +270,8 @@ Separate lines, because they are very different claims:
 
 | Claim | Status |
 |-------|--------|
-| Mocked test suites | **passed** — 549 assertions in `php tests/run.php` (101 of them Task 04) |
-| End-to-end HTTP journeys | **passed** — 94 checks in `tests/http-clerk.sh` |
+| Mocked test suites | **passed** — 633 assertions in `php tests/run.php` (101 of them Task 04) |
+| End-to-end HTTP journeys | **passed** — 110 checks in `tests/http-clerk.sh` |
 | Migration on a pre-Task-04 database | **passed** — SQLite fresh, legacy upgrade, duplicate-block and idempotent re-run; MySQL DDL proven 9/9 separately |
 | Live Cloudflare read used for availability | **not verified** — no credentials in the delivery environment |
 | DNS provisioning against a real zone | **not verified** — deliberately not attempted |
@@ -283,13 +283,74 @@ Separate lines, because they are very different claims:
 - Customer hosting of any kind (no file manager, PHP, MySQL or mail hosting)
 - Releasing an `active` name from the browser (would orphan a live record)
 
-## Task 05 — Accounts & email (Next)
+## Task 05 — User dashboard & subdomain management (Done)
+
+The signed-in product, built on the Task 01–04 backend. No new framework, no new
+dependency, no business rule re-implemented in a template.
+
+**Shell**
+- [x] `includes/views/layouts/dashboard.php` — sidebar ≥992px, Bootstrap off-canvas <992px, one nav definition
+- [x] Top bar with breadcrumb-style page title and a "New subdomain" action
+- [x] Account block + POST sign-out in the sidebar foot and the off-canvas
+- [x] `partials/status-badge.php` — one badge component, label always rendered as text
+
+**Pages**
+- [x] Overview — display name, e-mail, account status, four DB-backed statistics, quota meter, per-extension breakdown, recent activity, honest empty state
+- [x] My subdomains — table on desktop, cards on mobile, filter by canonical status, released names read-only
+- [x] Subdomain detail — basic info, DNS/provisioning state, timeline built only from recorded events, safe failure copy, release panel
+- [x] Reservations — every request with outcome, review and expiry timestamps, linked subdomain, filter
+- [x] Find a subdomain — availability check via the existing engine, reservation form, quota context
+- [x] Account — profile, quota, security facts, sign-out; explains that Clerk owns credentials
+
+**Backend additions (thin, reuse-first)**
+- [x] `Subdomain::provisioningFor()` / `provisioningForMany()` — user-safe job state, constant query count for a list
+- [x] `Subdomain::forUser($id, $limit, $includeTerminated)` — released names are opt-in history
+- [x] `SubdomainQuota::overview()` / `byDomain()` — the dashboard's view of the rule the reservation service enforces
+- [x] `includes/services/Dashboard/DashboardStatus.php` — canonical state → words, timeline builder, release rules
+
+**Fixes found while building it**
+- [x] `app_base_path()` could emit a filesystem path (leaking the install directory into asset URLs) when `SCRIPT_NAME` is absolute; extracted to a pure `app_base_path_from()` with two guards and six tests
+- [x] `Auth::user()` relied on a caller having loaded `models/User.php` first; it now requires it explicitly
+- [x] `is_active_path()` matched raw prefixes (`/subdomain.php` matched `/subdomain.php.bak`); now matches on segment boundaries
+
+**Security**
+- [x] Ownership in SQL on every read; a foreign id is a `404` identical to a missing one
+- [x] Digit-validated ids; no cast of arbitrary input
+- [x] CSRF on every mutation, POST only, GET never mutates
+- [x] Release restricted to `pending_dns` / `failed` / `suspended`; an active name explains the support path
+- [x] No provider token, record id, operator error, Clerk identifier or stack trace in any rendered page
+
+**Tests**
+- [x] `tests/run.php` → 633 assertions (was 549); new `dashboard` suite has 76
+- [x] `tests/dashboard-render.php` → 88 assertions across eight rendered pages
+- [x] `tests/http-dashboard.py` → 83 HTTP checks (auth boundary, isolation, CSRF, release, logout)
+- [x] `tests/http-clerk.sh` → 110 checks (was 94), green under `APP_DEBUG=true` and `false`
+- [x] `tests/dashboard.sh` runs all of it in one command
+
+| Claim | Status |
+|-------|--------|
+| Mocked test suites | **passed** — 633 assertions (`dashboard`: 76) |
+| Render harness | **passed** — 88 assertions |
+| Dashboard HTTP checks | **passed** — 83, twice (debug on/off) |
+| End-to-end Clerk flow | **passed** — 110 checks, twice |
+| Responsive at 320/375/768/1024/1440 | **not visually verified** — no browser binary is reachable here; verified structurally instead |
+| Live Cloudflare / live Clerk rendering of real data | **not verified** — no credentials |
+
+### Deliberately not implemented
+
+- Client-side provisioning or any "refresh DNS" button
+- An e-mail/name editor that would contradict Clerk (or let someone claim an unverified address)
+- Password management of any kind
+- Releasing an `active` name from the browser (would orphan a live record)
+- A second layout, a CSS framework, or any JavaScript framework
+
+## Task 06 — Accounts & email (Next)
 
 - [ ] Transactional email for reservation status changes (account e-mail verification and password reset are handled by Clerk)
 - [ ] Optional 2FA (TOTP) for administrators (Clerk supports MFA; wire it into the instance policy)
 - [ ] Session/device management ("sign out everywhere") — `ClerkApiClient::revokeSession` is already available
 
-## Task 06 — Operations & hardening (Later)
+## Task 07 — Operations & hardening (Later)
 
 - [ ] Nginx sample configuration with the same denies and headers
 - [ ] Structured logging + log rotation; retention policy for `audit_logs`
@@ -300,7 +361,7 @@ Separate lines, because they are very different claims:
 - [ ] CI pipeline: lint (`php -l`), test suite, optional MySQL service container
 - [ ] Screenshot/visual regression tests once a headless browser is available
 
-## Task 07 — Product polish (Later)
+## Task 08 — Product polish (Later)
 
 - [ ] User-facing API keys for programmatic reservation management
 - [ ] Public status page for DNS incidents
