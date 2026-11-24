@@ -35,12 +35,20 @@ FreeSub lets registered users search for a subdomain on a root domain the platfo
 - Abuse report form with validation, rate limiting and audit logging.
 - Accessible markup: skip link, landmarks, labelled controls, visible focus states, `prefers-reduced-motion` support, no inline event handlers (CSP-friendly).
 
-**Accounts**
+**Accounts (Clerk)**
 
-- Registration with server-side validation, `password_hash()` (bcrypt, cost 12), automatic rehash on login, uniform failure messages and timing.
-- Login with per-account lockout after repeated failures plus IP/email rate limiting, session id rotation, and a user-agent fingerprint check.
-- POST-only, CSRF-protected logout.
-- Sessions: `HttpOnly`, `SameSite`, `Secure` when on HTTPS, strict mode, custom save path, idle timeout.
+- Registration, sign-in, **Google OAuth**, e-mail verification and password
+  recovery are handled by Clerk's components mounted on our own pages with the
+  official `clerk-js` build. There is no password field anywhere in FreeSub.
+- Sign-in completes through a one-time, single-use **handoff ticket** that PHP
+  verifies server-side (see [Authentication (Clerk)](#authentication-clerk)).
+- Existing accounts — including administrators — are linked to their Clerk
+  identity by verified e-mail; ids, reservations and audit history survive.
+- POST-only, CSRF-protected logout that also revokes the Clerk session.
+- Sessions: `HttpOnly`, `SameSite`, `Secure` when on HTTPS, strict mode, custom
+  save path, idle timeout, id rotation and a client fingerprint re-checked on
+  every request.
+- CLI-only break-glass path for emergencies (`php database/break-glass.php`).
 
 **Dashboard**
 
@@ -59,7 +67,7 @@ FreeSub lets registered users search for a subdomain on a root domain the platfo
 
 **Data layer**
 
-- Seven tables with primary keys, foreign keys, unique constraints, indexes, `created_at`/`updated_at` (with `ON UPDATE CURRENT_TIMESTAMP` on MySQL).
+- Nine tables (seven domain/user tables plus `clerk_handoffs` and `clerk_sessions`) with primary keys, foreign keys, unique constraints, indexes, `created_at`/`updated_at` (with `ON UPDATE CURRENT_TIMESTAMP` on MySQL).
 - Multi-domain ready: extensions are rows, the UI and API read from the table, adding a domain needs no code change.
 - Generated `extension` column (MySQL) derived from `root_domain`.
 - DNS records stored as *desired state* only; `dns_records.provider_record_id` is reserved for the future Cloudflare sync.
@@ -71,7 +79,9 @@ FreeSub lets registered users search for a subdomain on a root domain the platfo
 - Output escaping through a single `e()` helper (`ENT_QUOTES | ENT_SUBSTITUTE | ENT_HTML5`).
 - Security headers (`X-Content-Type-Options`, `X-Frame-Options`, `Referrer-Policy`, `Permissions-Policy`, COOP, CSP via `.htaccess`), `X-Powered-By` removed.
 - `.htaccess` rules block `config/`, `includes/`, `storage/`, `database/`, dot files and backups, with matching `403/404` handler and no directory listing.
-- Secrets live only in `.env`; the DNS abstraction reads its token from the environment, and no schema column stores a token.
+- Secrets live only in `.env` (Clerk keys, webhook secret, DNS token); no schema column stores a token, and no Clerk secret is ever rendered, logged or committed.
+- Clerk session tokens are verified natively (signature, `alg`, `kid`, `iss`, `exp`, `nbf`, `azp`, `sub`); webhook payloads are verified with the svix HMAC before parsing.
+- Roles come only from the database — never from Clerk metadata, a token claim or form input.
 
 ---
 
@@ -104,15 +114,29 @@ mysql -u root -p < database/schema.sql
 #    ...or let the installer do it (reads .env):
 php database/install.php
 
-# 4. Fill in DB_* in .env, then create an administrator
-#    (prompts for a hidden password; --password=... for CI)
+# 4. Fill in DB_* in .env, then the Clerk keys (see Authentication below)
+#    CLERK_PUBLISHABLE_KEY=pk_test_...
+#    CLERK_SECRET_KEY=sk_test_...            (server-side only, never committed)
+#    CLERK_AUTHORIZED_PARTIES=http://localhost:8000
+
+# 5. Apply the Clerk identity migration
+php database/migrate.php
+php database/clerk-check.php        # must exit 0 before anyone can sign in
+
+# 6. Create the first administrator. It is a local row with the admin role and
+#    no Clerk identity; the first time that e-mail signs in through Clerk the
+#    account is linked to it, keeping the role.
+#    (prompts for a hidden local password; --password=... for CI)
 php database/create-admin.php "Your Name" you@example.com
 
-# 5. Run it
+# 7. Run it
 php -S localhost:8000 router.php
 ```
 
-Open <http://localhost:8000>. Sign in with the administrator you just created and visit `/admin/index.php`.
+Open <http://localhost:8000>, choose **Sign in**, and register or sign in with
+the e-mail address you used in step 6. Clerk's own component handles the
+credentials; FreeSub then attaches your Clerk identity to the administrator row
+and `/admin/index.php` is available.
 
 **Permissions.** The web server user must be able to write to `storage/logs`, `storage/cache` and `storage/sessions` (and `storage/database.sqlite` if you use SQLite):
 
@@ -122,7 +146,7 @@ chmod -R 775 storage
 
 **Subdirectory installs** work too — URLs are generated from the detected base path, so `https://example.com/freesub/` needs no configuration changes.
 
-**SQLite quick start (development only).** Set `DB_DRIVER=sqlite` and `DB_SQLITE_PATH=storage/database.sqlite`, then run `php database/install.php`, which imports `database/schema.sqlite.sql`. Production must use MySQL/MariaDB — the SQLite schema exists so the app and tests can run without a database server, and a few MySQL-only features (generated column, `ON UPDATE CURRENT_TIMESTAMP`, JSON type) are emulated.
+**SQLite quick start (development only).** Set `DB_DRIVER=sqlite` and `DB_SQLITE_PATH=storage/database.sqlite`, then run `php database/install.php`, which imports `database/schema.sqlite.sql` (which already includes the Clerk tables). Production must use MySQL/MariaDB — the SQLite schema exists so the app and tests can run without a database server, and a few MySQL-only features (generated column, `ON UPDATE CURRENT_TIMESTAMP`, JSON type) are emulated.
 
 ---
 
@@ -193,7 +217,7 @@ freesub/
 ├── api/check.php           Public JSON availability endpoint (read-only)
 ├── assets/
 │   ├── css/app.css         Design system (tokens, components, responsive rules)
-│   ├── js/app.js           Icons, header, reveal, live search, password UX
+│   ├── js/app.js           Icons, header, reveal, live search
 │   ├── vendor/             Bootstrap CSS/JS + Lucide (vendored, no CDN)
 │   ├── fonts/              Self-hosted Plus Jakarta Sans
 │   └── images/             Favicon, logo mark, social cover
@@ -495,7 +519,7 @@ Suites:
 | `views` | every view/link/redirect target exists |
 | `http` | HTTP journeys (needs a running server) |
 
-Current status: **266 assertions green** on PHP 8.5 with SQLite, plus **49 end-to-end HTTP checks** in `tests/http-clerk.sh`. The MySQL schema in `database/schema.sql` was validated against a real MariaDB 13.1 engine (import, generated column, FKs, cascades, idempotent re-run).
+Current status: **266 assertions green** on PHP 8.5 with SQLite, plus **58 end-to-end HTTP checks** in `tests/http-clerk.sh`. The MySQL schema in `database/schema.sql` was validated against a real MariaDB 13.1 engine (import, generated column, FKs, cascades, idempotent re-run).
 
 The tests use a throwaway database file (`storage/test-<pid>.sqlite`) and delete it afterwards. They never touch production data.
 
@@ -530,6 +554,14 @@ Tracked in [`TASKS.md`](TASKS.md). Highlights:
 | 404 on `config/...` or `.env` | Expected: those paths are blocked on purpose |
 | Styles missing | `assets/vendor/bootstrap.min.css` not deployed, or a strict CSP blocked a third-party CDN (everything is self-hosted) |
 | Everything 200, even bogus URLs | Using `php -S` without `router.php`. Harmless for the app, but use the router (or Apache) for correct 404s |
+| The sign-in form is blank or "Sign-in is not configured" | `CLERK_PUBLISHABLE_KEY` is missing/malformed. Run `php database/clerk-check.php` |
+| Clerk renders, but signing in shows "reload the page and try again" | The page's channel expired (you left it open) — reload. If it persists, `CLERK_AUTHORIZED_PARTIES` does not match the origin in the address bar, or cookies are blocked |
+| "Your Clerk instance is missing the freesub_handoff JWT template" | Create the template in the Clerk dashboard (Configure → JWT Templates), or set `CLERK_JWT_TEMPLATE` to the name you used |
+| Sign-in succeeds but lands back on `/login.php` | `CLERK_SECRET_KEY` is wrong or missing, so the bridge refuses to mint a ticket (it returns `503`). `php database/clerk-check.php` exits `2` or `3` |
+| "This email address is already linked to a different sign-in account" | Two Clerk identities claim one verified address. Resolve it with `php database/link-clerk.php --list`, then fix the duplicate in the Clerk dashboard |
+| Webhook returns `503 not_configured` | `CLERK_WEBHOOK_SECRET` is empty. Copy the `whsec_…` value from the webhook endpoint in the dashboard |
+| Webhook returns `401 invalid_signature` | The secret does not belong to that endpoint, the request was replayed (>5 min), or a proxy rewrote the body. Check `storage/logs/php-error.log` for the reason |
+| Administrator lost access after the migration | The Clerk e-mail must be **verified** and must match the row exactly. Check `php database/link-clerk.php --unlinked`, then use `php database/break-glass.php` if needed |
 
 ---
 

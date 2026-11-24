@@ -220,6 +220,10 @@
     }
 
     /* ---------------------------- Password ------------------------------ */
+    // There is no password field in the application any more: credentials are
+    // collected by Clerk's own components, which own their input behaviour.
+    // The shared helpers below are kept only for admin forms that may add a
+    // reveal toggle later.
     function initPasswords() {
         doc.querySelectorAll('[data-password-toggle]').forEach(function (button) {
             button.addEventListener('click', function () {
@@ -235,40 +239,6 @@
                 button.innerHTML = '<i data-lucide="' + (show ? 'eye-off' : 'eye') + '"></i>';
                 renderIcons(button);
             });
-        });
-
-        doc.querySelectorAll('[data-password-strength]').forEach(function (input) {
-            var meter = doc.querySelector('[data-password-meter="' + input.id + '"]');
-            var hint = doc.querySelector('[data-password-hint="' + input.id + '"]');
-
-            if (!meter) {
-                return;
-            }
-
-            var score = function (value) {
-                var points = 0;
-                if (value.length >= 10) points++;
-                if (value.length >= 14) points++;
-                if (/[a-z]/.test(value) && /[A-Z]/.test(value)) points++;
-                if (/\d/.test(value)) points++;
-                if (/[^A-Za-z0-9]/.test(value)) points++;
-                return Math.min(4, points);
-            };
-
-            var labels = ['Too short', 'Weak', 'Okay', 'Good', 'Strong'];
-
-            var update = function () {
-                var value = input.value || '';
-                var value2 = score(value);
-                meter.setAttribute('data-score', value === '' ? '0' : String(value2));
-
-                if (hint) {
-                    hint.textContent = value === '' ? 'At least 10 characters, with a letter and a number.' : labels[value2] + ' password';
-                }
-            };
-
-            input.addEventListener('input', update);
-            update();
         });
     }
 

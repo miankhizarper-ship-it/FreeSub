@@ -23,8 +23,9 @@ run on a networked machine.
 | Area | Result |
 |------|--------|
 | Credential handling | **Pass** — no web password ever reaches PHP; no Clerk credential is stored |
+| Browser integration | **Pass** after one fix — every key the client script needs is emitted, asserted mechanically (§4 F11) |
 | Token verification | **Pass** — signature, `alg`, `kid`, `iss`, `exp`, `nbf`, `azp`, `sub`, with `iss` checked (the SDK does not) |
-| Session management | **Pass** after fixes; two defects were found and fixed during this audit (§4) |
+| Session management | **Pass** after one fix — the client fingerprint is now re-checked on every resolution (§4 F2) |
 | Authorization / roles | **Pass** — server-side only, never from Clerk or the client |
 | CSRF / same-origin | **Pass** |
 | Secret hygiene | **Pass** — no secret in HTML, logs, URLs, database or responses |
@@ -33,9 +34,10 @@ run on a networked machine.
 | Break-glass path | **Pass** after two fixes; CLI-only, password-gated, flag-gated, audited |
 | Dependency posture | **Pass with a caveat** — SDK declared but not vendored (§6) |
 
-Ten issues were found during this audit and have been fixed; they are listed in
+Eleven issues were found during this audit and have been fixed; they are listed in
 §4, because a report that only lists what currently looks fine is useless to the
-next reviewer. Four risks remain open and are listed in §5.
+next reviewer. Five risks remain open and are listed in §5 — the most important
+being that none of this has been run against the live Clerk instance.
 
 ---
 
@@ -285,6 +287,20 @@ when it then exited non-zero. **Fix:** `canCompleteSignIn()` and the exit codes
 (`0 ok / 2 incomplete / 3 unreachable-or-rejected-key`) now reflect unusability,
 and the summary text states plainly that nobody can sign in.
 
+### F11 — The Clerk SDK URL was never resolvable (functional break, Critical for sign-in)
+
+`clerk-auth.js` builds the SDK URL from `config.frontendApi`, but the partial
+never emitted that key. `clerkScriptUrl()` therefore returned `null`, the script
+never loaded, and every visitor saw "Sign-in is not configured. Please contact
+support." on a correctly configured deployment. The value is public (it is the
+first segment of the publishable key), so there was never a reason to omit it.
+
+**Fix:** the partial now emits `frontendApi` from `ClerkConfig::frontendApiHost()`,
+and the end-to-end suite asserts that **every** key `clerk-auth.js` reads is
+present in the rendered page — verified mechanically by grepping `config.<key>`
+out of the script and comparing it with the embedded JSON, so this class of bug
+cannot come back silently.
+
 ---
 
 ## 5. Open risks
@@ -350,7 +366,7 @@ web route that accepts a password.
 | `clerk-webhook-effects` | 17 | `user.updated`/`user.deleted`/session events, no provisioning, idempotency |
 | `env`, `security`, `auth`, `schema`, `subdomains`, `audit`, `views` | 125 | inherited controls (8+39+22+13+25+8+10), still green after the auth rewrite |
 | **Total** | **266** | all green, no network, isolated SQLite |
-| `tests/http-clerk.sh` | **49 checks** | real HTTP: page rendering, no password field, guest redirects, bridge hardening, full handoff, replay, admin denial, webhook signature/replay/idempotency, administrator migration, logout |
+| `tests/http-clerk.sh` | **58 checks** | real HTTP: both pages render, no password field, every config key the JS reads, guest redirects, bridge hardening, full handoff, replay, admin denial, webhook signature/replay/idempotency, administrator migration, logout |
 
 Not covered by automated tests, and why: rendering of the Clerk components
 (themselves) needs a browser and network access to the frontend API; Google

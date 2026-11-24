@@ -108,7 +108,7 @@ now live entirely in Clerk; FreeSub stores only the link to a Clerk user id.
 - [x] 7 new suites (`clerk-config`, `clerk-token`, `clerk-sync`, `clerk-handoff`, `clerk-session`, `clerk-webhook`, `clerk-webhook-effects`) — 141 assertions, plus 2 secret-hygiene assertions added to `security`
 - [x] Registration, login, logout, invalid/legacy session, expired token, unauthorized dashboard/admin, existing-admin migration, duplicate sync, relationship preservation
 - [x] Real RS256 signatures via a committed test-only key pair; Backend API stubbed at the transport seam
-- [x] `tests/http-clerk.sh`: 49 end-to-end HTTP checks against the real endpoints
+- [x] `tests/http-clerk.sh`: 58 end-to-end HTTP checks against the real endpoints
 - [x] 266 assertions total, all green
 
 ### Known limitations

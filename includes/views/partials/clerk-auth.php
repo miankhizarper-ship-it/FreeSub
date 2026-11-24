@@ -129,6 +129,10 @@ $statusUrl = $mode === 'sign-up' ? '/register.php' : '/login.php';
 <script type="application/json" data-clerk-config>
 <?= json_encode([
     'publishableKey' => (string) ($clerkPublishableKey ?? ''),
+    // The frontend API host is public (it is the first segment of the
+    // publishable key). clerk-auth.js loads the SDK from it; without it the
+    // script cannot be resolved and sign-in would report "not configured".
+    'frontendApi' => (string) (ClerkConfig::frontendApiHost() ?? ''),
     'mode' => $mode,
     'channel' => $channel,
     'state' => $state,

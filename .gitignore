@@ -16,8 +16,12 @@ storage/sessions/*
 storage/*.sqlite
 storage/*.sqlite-*
 
-# Dependencies (this project ships no Composer or npm packages)
+# Dependencies
+# The application runs without vendor/; composer.json declares the official
+# Clerk SDK for deployments that prefer it (see composer.lock.md).
 /vendor/
+composer.lock
+
 /node_modules/
 
 # OS / editor noise

@@ -101,6 +101,32 @@ check("bridge URL is same-origin", cfg.get("bridgeUrl", "").startswith("http")
 form_token = csrf(page)
 check("CSRF token present in the handoff form", len(form_token) >= 32)
 
+# Every key clerk-auth.js reads must actually be emitted, otherwise the page
+# silently degrades to "not configured".
+JS_PATH = os.path.join(ROOT, "assets", "js", "clerk-auth.js")
+js_source = open(JS_PATH, encoding="utf-8").read()
+required_keys = sorted(set(re.findall(r"config\.([A-Za-z][A-Za-z0-9_]*)", js_source)))
+missing = [key for key in required_keys if not cfg.get(key)]
+
+check(f"every config key the JS reads is emitted ({', '.join(required_keys)})",
+      not missing, f"missing: {missing}")
+
+check("frontend API host is published for the SDK loader",
+      cfg.get("frontendApi") == "freesub-test.clerk.accounts.dev", cfg.get("frontendApi"))
+check("handoff template name is published",
+      cfg.get("handoffTemplate") == "freesub_handoff", cfg.get("handoffTemplate"))
+
+print("Registration page")
+signup = requests.Session().get(f"{BASE}/register.php")
+check("register page renders", signup.status_code == 200, signup.status_code)
+check("register page has no password field", 'type="password"' not in signup.text)
+check("register page mounts Clerk's sign-up component", "data-clerk-sign-up" in signup.text)
+check("register page has its own channel",
+      config(signup).get("mode") == "sign-up" and config(signup).get("channel") != cfg.get("channel"),
+      config(signup).get("mode"))
+check("register page never carries the secret", "sk_test" not in signup.text)
+check("register page exposes the handoff form", 'name="handoff_token"' in signup.text)
+
 print("Guests")
 for path in ("/dashboard.php", "/admin/index.php"):
     response = session.get(f"{BASE}{path}", allow_redirects=False)
