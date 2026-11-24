@@ -7,6 +7,7 @@ declare(strict_types=1);
  *
  * Usage:
  *   php database/create-admin.php "Ada Lovelace" ada@example.com
+ *   php database/create-admin.php "Ada Lovelace" ada@example.com --password='S3cret...'
  *   php database/create-admin.php "Ada Lovelace" ada@example.com --promote
  *
  * The password is read from the terminal without echoing. For unattended
@@ -27,7 +28,7 @@ $name = $args[0] ?? null;
 $email = $args[1] ?? null;
 
 if ($name === null || $email === null) {
-    fwrite(STDERR, "Usage: php database/create-admin.php \"Full Name\" email@example.com [--promote]\n");
+    fwrite(STDERR, "Usage: php database/create-admin.php \"Full Name\" email@example.com [--promote] [--password=...]\n");
     exit(1);
 }
 

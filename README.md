@@ -103,6 +103,7 @@ mysql -u root -p < database/schema.sql
 php database/install.php
 
 # 4. Fill in DB_* in .env, then create an administrator
+#    (prompts for a hidden password; --password=... for CI)
 php database/create-admin.php "Your Name" you@example.com
 
 # 5. Run it
